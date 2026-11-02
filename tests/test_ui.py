@@ -2150,7 +2150,9 @@ async def test_internal(hass, service_calls, hass_client, hass_storage, monkeypa
         'domain':'alert2', 'name':'warning', 'friendly_name': 'f1a' } }})
     assert rez == {}
     
-    assert hass.states.get('alert2.alert2_warning').attributes['friendly_name'] == 'f1'
+    # hm: the live alert takes the new settings at once (upstream: at the next reload)
+    await hass.async_block_till_done()
+    assert hass.states.get('alert2.alert2_warning').attributes['friendly_name'] == 'f1a'
     await do_reload(cfg, hass, monkeypatch)
     assert hass.states.get('alert2.alert2_warning').attributes['friendly_name'] == 'f1a'
     

@@ -25,6 +25,23 @@ cp ha-test.old/configuration.yaml ha-test
 
 Alert2 is a [Home Assistant](https://www.home-assistant.io/) component that supports alerting and sending notifications based on conditions and events. It's a retake on the original [Alert](https://www.home-assistant.io/integrations/alert/) integration.
 
+> **This is a fork** of [redstone99/hass-alert2](https://github.com/redstone99/hass-alert2) (based on
+> Alert2 1.22), released as `v1.22+hm.N`. Everything it adds is marked **Fork (hm)** below and is
+> add-only: upstream behaviour is unchanged unless you use it. In short:
+>
+> - **alert-console-card** ([its README](alert-console-card/README.md)) - an Alerts view for tablets
+>   and phones (what is firing, a chart, every alert's timeline), a rule editor, and banners that
+>   drop in across the top of chosen dashboards.
+> - **Push to users** (`user:<id>`, `user:*`) - every phone signed in to the app as them, with
+>   Clear / Snooze buttons, taken back when the alert is OK (`hm_push.py`, `alerts_page`).
+> - **Rules as files** (`rules_dir`) - every UI rule is a YAML file too (`hm_rules.py`).
+> - **A timeline per alert**, kept across restarts (`hm_timeline.py`).
+> - **Calendar reminders** - an API other cards use to put alerts on calendar events
+>   (`alert2/hm/reminders/*`, `hm_reminders.py`).
+> - Rule fields: `category`, `description`, `link` / `link_mobile`, `overlay` (banners),
+>   `allow_clear`, `stays_firing_mins`, `actions_on` on event alerts; top level
+>   `start_delay_secs`, `merge_warnings_into_errors`.
+
 ## Table of Contents
 
 - [New features](#new-features)
@@ -267,6 +284,15 @@ Alert2 automatically defines a few event alerts that fire internally:
 * `alert2.alert2_error` - This event alert fires on config errors and errors in Alert2 itself. If you specify a notifier that doesn't exist for `alert2_error` itself, then it falls back to `persistent_notification`.
 
 Each of these alerts can be configured in your config, either YAML or via the UI.  To disable notifications for an alert, you can set the notifier to `null`. See example in the [Tracked](#tracked) section, below.
+
+**Fork (hm):** settings for one of these alerts saved through the UI (`manageAlert` create or
+update) are the live alert's at once: it is declared again with them, as a UI rule is on an
+edit (so, like an edited rule, it starts fresh). Upstream applies them only at the next
+reload. Not for an alert the YAML `tracked:` configures - YAML wins at every start, so the
+change would not last - nor for one that does not exist (`skip_internal_errors`, a warning
+alert merged into the error alert). With the fork's `rules_dir`, such settings are a file
+like any rule's (`alert2_error.yaml`); alert-console-card edits them with only what may
+change (see its README, *Edit*).
 
 If you want to completely disable these internal alerts, you can set `skip_internal_errors` to true. However, note that if `alert2.alert2_error` fires indicating a problem, you may stop receiving alerts for things you do care about. So in a sense, this alert is at least as important as your most important alert.
 
@@ -575,6 +601,26 @@ You may want to set `ack_required` to continue to get reminders that the alert f
 
 Lastly, you can test your automation action in the UI.  The lovelace "more-info" dailog (that pops up when you click on the alert2 entity in the UI) has a line at the bottom showing whether the `actions_on` automation action is running and buttons to cancel the run as well as to manually start a run.
 
+**Fork (hm):** event alerts take `actions_on` too, and run it each time they fire (give it
+`mode: queued` so fires close together each run it). Besides `notify_reason`, `alert_domain` and
+`alert_name`, the actions get `alert_entity_id` and `alert_message` - what the alert said when it
+fired - so a script can announce it:
+
+    actions_on:
+      mode: queued
+      actions:
+        - action: script.announce
+          data:
+            message: "{{ alert_message }}"
+
+Each run, ok or failed (with the error), is on the alert's timeline (`alert2_hm_action`).
+
+**Fork (hm):** a `delay_on_secs` wait under way when Home Assistant restarts carries on from
+when it began, instead of starting again from nothing - a restart every few hours used to keep
+a 24 h delay from ever ending. It is kept in the alert's restore data, only while a wait runs;
+after the restart the wait goes on if the condition still holds, and is cleared as usual if
+not. An edited alert starts over.
+
 #### Common alert features
 
 Most template alert config fields can access the following extra variables for convenience: `alert_entity_id`, `alert_domain` and `alert_name`. 
@@ -711,6 +757,73 @@ An example of using an entity as an Alert2 native group.  Handles alerts fired d
           condition: ...
           notifier: sensor.my_group
         
+**Fork (hm):** a notifier can be a **user**: `user:<user id>` is every device signed in to the
+Home Assistant app as that user (with notifications allowed on it), and `user:*` every device
+with the app. They are turned into those devices' `mobile_app_*` notifiers each time the alert
+notifies, so a user's new phone gets the next push without the rule changing, and a renamed
+one is not lost (the app names its notifier after the device, and renames it with the
+device). A user with no such device tells nobody, without an error; a device reached twice is
+told once. The timeline's "notified" entry carries the devices' names (`names`) besides the
+notifiers. The rule editor reads the users and their devices with the websocket command
+`alert2/hm/push_users`.
+
+    notifier: ['user:9f2c4e1a7b3d4c5e8f0a1b2c3d4e5f60']   # one user's devices
+    notifier: ['user:*']                                  # every device with the app
+
+**Fork (hm):** a push to a phone's Home Assistant app (a `mobile_app_*` notifier) belongs to
+its alert. Other notifiers are sent as before.
+
+- It is tagged with the alert's entity id (`data.tag`), so the alert's next push replaces it.
+- A tap opens the alert's `link`. Without one, it opens the alert in the app: the top-level
+  option `alerts_page` names the phone's Alerts page, which opens it from
+  `?alert=<entity id>` (see alert-console-card).
+- While the alert fires, the push has buttons:
+  - *Clear*, when the alert may be cleared: as `allow_clear` says, or, without it, for an
+    event alert only;
+  - *Snooze: Tomorrow Morning* (8:00) and *Snooze: One Week*, the cards' lengths;
+  - *Snooze: Custom…*, which opens the alert on `alerts_page` with its snooze menu open
+    (`&snooze=1`).
+
+  A pressed button comes back as `mobile_app_notification_action`. It is answered with
+  `alert2.ack`, or with `alert2.notification_control` (a snooze of notifications only, as the
+  cards snooze), in the button press's context, so the timeline names who pressed it.
+- It is taken back (the app's `clear_notification`, by tag) once it is over: the alert is OK
+  again (when `done_notifier` is false; otherwise its "OK again" push replaces it), cleared,
+  snoozed, or its notifications are switched off. The phones holding one are the alert's
+  `pushed_to` attribute (only while there are any), so a restart in between forgets none.
+
+`data` a rule sets itself (its own `tag`, `url` or `actions`) is kept as it is.
+
+    alert2:
+      alerts_page: /mobile-dashboard/alerts
+
+**Fork (hm):** `overlay`, a list of dashboards (`tablet-dashboard`), puts the alert as a
+banner across the top of those dashboards while it fires - or a dashboard's Home page alone
+(`tablet-dashboard/home`: that page, not a pop-up open on it). Alert2 only carries the list, as
+the alert's `overlay` attribute. The banner is alert-console-card's (see its README). A
+calendar reminder takes the same choice as `banner_home: true` on `alert2/hm/reminders/save`,
+and reads it back as `banner` (the dashboards) plus `banner_home`.
+
+**Fork (hm): calendar reminders.** An alert on one calendar event, made for other cards (the
+Simple Schedule card's Alert section) through four websocket commands - anyone signed in may
+use them, as `/api/alert2/manageAlert`:
+
+| command | does |
+|---|---|
+| `alert2/hm/reminders/targets` | who can be pushed to (the users, `user:*`) and the dashboards a banner can show on |
+| `alert2/hm/reminders/subscribe` | every reminder now, and again after each change |
+| `alert2/hm/reminders/save` | make one, or change one (`ui_id`): `calendar`, `match` (`event` / `series` / `title`), `uid` and `recurrence_id` (one event) or `title` (by title), `summary`, `start`, `all_day`, `offset_mins`, `push`, `banner`, `priority`, `clock` |
+| `alert2/hm/reminders/delete` | by `ui_id`, or every reminder of an event (`calendar` + `uid`, with `recurrence_id` for one occurrence) - never one by title |
+
+A reminder is an ordinary UI rule (domain `rule`, category `reminders`): an event alert on the
+calendar's trigger, `offset_mins` before the start, let through only for its event - by
+`trigger.calendar_event.uid`, plus `recurrence_id` for one occurrence of a series - or, by
+title, for every event so called (`summary`, trimmed, any case). It stays Firing until the
+event starts (at least 15 minutes). It shows in the Alerts view and opens in its editor; a
+save from the calendar keeps whatever else was set there. A reminder of one event removes
+itself once the event is over or gone: a sweep 10 minutes after start-up and then nightly,
+which never removes anything on a calendar it cannot read. One by title is about events still
+to be made too, and stays until it is removed.
 
 ### Tracked
 

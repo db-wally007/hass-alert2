@@ -20,6 +20,7 @@ from   homeassistant.exceptions import TemplateError, ServiceNotFound, HomeAssis
 from   homeassistant.helpers import template as template_helper
 import homeassistant.helpers.entity_registry as er
 from   homeassistant.helpers.event import TrackTemplate, TrackTemplateResult, async_track_template_result
+from   homeassistant.helpers.event import async_call_later  # hm: start_delay_secs
 from   homeassistant.helpers.trigger import async_initialize_triggers
 from   homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from   homeassistant.components.sensor import SensorDeviceClass, SensorEntity
@@ -46,6 +47,15 @@ from .util import (
     PersistantNotificationHelper
 )
 from .config import ( literalIllegalChar )
+from . import hm_push  # hm: pushes to phones (tags, buttons, taking them back)
+# hm: fork additions - the timeline's own bus events (see hm_timeline.py)
+from .hm_timeline import (
+    EVENT_HM_DETECTED,
+    EVENT_HM_DETECT_CLEARED,
+    EVENT_HM_NOTIFIED,
+    EVENT_HM_NOTIFICATION_CONTROL,
+    EVENT_HM_ACTION,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -635,9 +645,15 @@ class AlertCommon(Entity):
                     await asyncio.sleep(0.1)
                     if self.hass.states.get(self.entity_id):
                         break
+                    # hm: removed (its rule edited or deleted) before it ever appeared - it never will
+                    if getattr(self, '_hm_removed', False):
+                        return
                     count -= 1
                 if count == 0:
                     report(DOMAIN, 'error', f'{gAssertMsg} Entity {self.entity_id} has not appeared in hass.states after waiting 0.5 s')
+            # hm: and a removed alert must not start watching (its trackers are gone)
+            if getattr(self, '_hm_removed', False):
+                return
             await self.noteAddToHassDone()
         create_task(self.hass, DOMAIN, waitForAdd())
     async def noteAddToHassDone(self):
@@ -645,17 +661,41 @@ class AlertCommon(Entity):
                                                          'domain': self.alDomain,
                                                          'name': self.alName })
         if self.earlyStart or self.alertData.haStarted:
-            await self.startWatching()
+            # hm: inside start_delay_secs of HA starting, it waits out the rest
+            left = 0 if self.earlyStart else self.alertData.hmStartDelayLeft()
+            if left > 0:
+                self._hm_startAfter(left)
+            else:
+                await self.startWatching()
         else:
             self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, self.startWatchingEv)
         
     async def startWatchingEv(self, event): # async so we run in event loop
+        # hm: an alert removed (deleted, or edited and made anew) before HA finished
+        # starting still has this listener; it must not wake up and watch.
+        if getattr(self, '_hm_removed', False):
+            return
+        # hm: start_delay_secs - until then it keeps the state it was restored with
+        left = self.alertData.hmStartDelayLeft()
+        if left > 0:
+            self._hm_startAfter(left)
+            return
         await self.startWatching()
+
+    def _hm_startAfter(self, secs):
+        """hm: start watching once start_delay_secs is over (unless removed by then)."""
+        @callback
+        def go(_now):
+            if getattr(self, '_hm_removed', False):
+                return
+            create_task(self.hass, DOMAIN, self.startWatching())
+        async_call_later(self.hass, secs, go)
 
     async def async_will_remove_from_hass(self) -> None:
         await super().async_will_remove_from_hass()
         await self.noteWillRemoveFromHass()
     async def noteWillRemoveFromHass(self):
+        self._hm_removed = True  # hm: see startWatchingEv
         self.hass.bus.async_fire(EVENT_ALERT2_DELETE, { 'entity_id': self.entity_id,
                                                          'domain': self.alDomain,
                                                          'name': self.alName })
@@ -1054,6 +1094,33 @@ class AlertBase(AlertCommon, RestoreEntity):
                     report(DOMAIN, 'warning', f'One-time msg: Alert2 v1.16 changed the syntax of how templates are used in "data" fields. If you wrote those templates pre-v1.16 you may need to update them. See docs at https://github.com/redstone99/hass-alert2?tab=readme-ov-file#common-alert-features-1')
         
         self._display_msg_template = config['display_msg'] if 'display_msg' in config else None
+        # hm: where the alert's details are - any address, a dashboard popup hash included
+        # (/tablet-dashboard/home#all-lights-popup). Shown as the `link` attribute and copied
+        # into notifications as data.url (iOS) / data.clickAction (Android).
+        self._hm_link_template = config['link'] if 'link' in config else None
+        # hm: the same place on the phone's dashboard (attribute `link_mobile`). Notifications
+        # use it before `link`: a phone is what opens a notification's link.
+        self._hm_link_mobile_template = config['link_mobile'] if 'link_mobile' in config else None
+        # hm: what the alert is for, in plain words (attribute `description`)
+        self._hm_description = config['description'] if 'description' in config else None
+        # hm: the group the cards file it under (attribute `category`), apart from its domain
+        self._hm_category = config['category'] if 'category' in config else None
+        # hm: how long the cards show an event alert as firing (attribute `stays_firing_mins`)
+        self._hm_stays_firing_mins = config['stays_firing_mins'] if 'stays_firing_mins' in config else None
+        # hm: whether a person may clear it; attribute `allow_clear` only when set
+        self._hm_allow_clear = config['allow_clear'] if 'allow_clear' in config else None
+        # hm: the dashboards that show a banner while it fires (attribute `overlay`, their
+        # url_paths) - drawn by the Alerts card; the engine only passes it on
+        self._hm_overlay = config['overlay'] if 'overlay' in config else None
+        # hm: the phones (app notifiers) holding a push of it, to take back once it is over
+        # (attribute `pushed_to`, only while there are any - see hm_push)
+        self._hm_pushed = set()
+        if self._hm_link_template is not None:
+            self._hm_link_template.hass = hass
+        if self._hm_link_mobile_template is not None:
+            self._hm_link_mobile_template.hass = hass
+        # hm: watches a link that is a template (see _hm_watch_links)
+        self._hm_link_tracker = None
         self._icon = getField('icon', config, defaultCfg)
         self._ack_required = config['ack_required'] if 'ack_required' in config else False
         self._ack_reminder_message_template = config['ack_reminder_message'] if 'ack_reminder_message' in config else None
@@ -1125,11 +1192,38 @@ class AlertBase(AlertCommon, RestoreEntity):
         #await super().startWatching()  not in parent class
         if self.friendlyNameTracker:
             self.friendlyNameTracker.startWatching()
+        self._hm_watch_links()
+
+    # hm: a link that is a template can change while the alert stays on or off - a rule's
+    # "only what this alert is about" names what is in a Health status right now. The state
+    # is only written when the alert changes, so the link is watched on its own and the
+    # state written again whenever it renders differently from the one shown.
+    def _hm_watch_links(self):
+        tmpls = [t for t in (self._hm_link_template, self._hm_link_mobile_template)
+                 if t is not None and not t.is_static]
+        if not tmpls or self._hm_link_tracker is not None:
+            return
+        @callback
+        def changed(event, updates):
+            cur = self.hass.states.get(self.entity_id)
+            if cur is None:
+                return
+            if (cur.attributes.get('link') != self.hm_link()
+                    or cur.attributes.get('link_mobile') != self.hm_link(mobile=True)):
+                self.async_write_ha_state()
+        self._hm_link_tracker = async_track_template_result(
+            self.hass, [TrackTemplate(t, self.extraVariables) for t in tmpls], changed)
+        self._hm_link_tracker.async_refresh()
 
     def getNotificationVars(self, reason: NotificationReason):
         notificationVars = { 'notify_reason': reason.name }
         notificationVars.update(self.extraVariables)
         return notificationVars
+
+    # hm: what an alert's actions are told besides notify_reason / alert_domain / alert_name:
+    # which alert it is, and what it said when it fired (for a script that announces it)
+    def _hm_action_vars(self):
+        return { 'alert_entity_id': self.entity_id, 'alert_message': self.last_fired_message or '' }
             
     async def async_will_remove_from_hass(self) -> None:
         await super().async_will_remove_from_hass()
@@ -1141,6 +1235,9 @@ class AlertBase(AlertCommon, RestoreEntity):
         if self.friendlyNameTracker:
             self.friendlyNameTracker.shutdown()
             self.friendlyNameTracker = None
+        if self._hm_link_tracker is not None:  # hm
+            self._hm_link_tracker.async_remove()
+            self._hm_link_tracker = None
         #self._attr_available = False
         if self.future_notification_info is not None:
             cancel_task(DOMAIN, self.future_notification_info['task'])
@@ -1179,6 +1276,9 @@ class AlertBase(AlertCommon, RestoreEntity):
                 tdate = dt.parse_datetime(last_state.attributes['last_ack_time'])
                 if not self.last_ack_time or tdate > self.last_ack_time:
                     self.last_ack_time = tdate
+            # hm: pushes still on phones from before the restart, to take back when it is over
+            if isinstance(last_state.attributes.get('pushed_to'), list):
+                self._hm_pushed |= set(last_state.attributes['pushed_to'])
             # If notification_control is set after startup but before async_added_to_hass
             # is called, then we'll overwrite it here.  TODO - improve this logic
             if 'notification_control' in last_state.attributes:
@@ -1222,8 +1322,55 @@ class AlertBase(AlertCommon, RestoreEntity):
             'priority': self._priority,
             'reminders_since_fire': self.reminders_since_fire,
         }
+        # hm: fork attributes, only when the alert has them
+        link = self.hm_link()
+        if link:
+            baseDict['link'] = link
+        link_mobile = self.hm_link(mobile=True)
+        if link_mobile:
+            baseDict['link_mobile'] = link_mobile
+        if self._hm_description:
+            baseDict['description'] = self._hm_description
+        if self._hm_category:
+            baseDict['category'] = self._hm_category
+        if self._hm_stays_firing_mins is not None:
+            baseDict['stays_firing_mins'] = self._hm_stays_firing_mins
+        if self._hm_allow_clear is not None:
+            baseDict['allow_clear'] = self._hm_allow_clear
+        if self._hm_overlay:
+            baseDict['overlay'] = list(self._hm_overlay)
+        if self._hm_pushed:
+            baseDict['pushed_to'] = sorted(self._hm_pushed)
         baseDict.update(self.more_state_attributes())
         return baseDict
+
+    # hm: whether a person may clear it - the cards' rule: as set, else yes for an event alert
+    # (it has no end of its own) and no for a condition alert (it turns OK by itself)
+    def hm_can_clear(self):
+        return self._hm_allow_clear if self._hm_allow_clear is not None else not isinstance(self, ConditionAlert)
+
+    # hm: its pushes taken back from the phones once it is over (see hm_push). True when there
+    # were any - `pushed_to` changed, the caller writes the state.
+    def hm_take_back(self):
+        if not self._hm_pushed:
+            return False
+        phones = sorted(self._hm_pushed)
+        self._hm_pushed = set()
+        create_task(self.hass, DOMAIN, hm_push.take_back(self.hass, phones, self.entity_id))
+        return True
+
+    # hm: the rendered link, or None. A broken template reports once per render and yields None
+    # rather than failing the whole state write.
+    def hm_link(self, mobile=False):
+        tmpl = self._hm_link_mobile_template if mobile else self._hm_link_template
+        if tmpl is None:
+            return None
+        try:
+            link = tmpl.async_render(variables=self.extraVariables, parse_result=False).strip()
+        except TemplateError as err:
+            report(DOMAIN, 'error', f'{self.name} {"link_mobile" if mobile else "link"} template: {err}')
+            return None
+        return link or None
     
     def notify_timer_cb(self, now):
         assert False, "not implemented"
@@ -1255,8 +1402,18 @@ class AlertBase(AlertCommon, RestoreEntity):
         now = dt.now()
         if do_ack:
             self.ack_int(now)
+        # hm: snoozed or switched off - its pushes are taken back. Notifications on again (the
+        # cards: a snooze that ends now) takes nothing back.
+        if new_snooze == NOTIFICATIONS_DISABLED or (isinstance(new_snooze, rawdt.datetime) and new_snooze > now):
+            self.hm_take_back()
         self.async_write_ha_state()
         self.reminder_check(now)
+        # hm: timeline entry - snoozed until / disabled / enabled, and by whom (the call's context)
+        self.hass.bus.async_fire(EVENT_HM_NOTIFICATION_CONTROL, {
+            'entity_id': self.entity_id, 'domain': self.alDomain, 'name': self.alName,
+            'enabled': enable,
+            'snooze_until': new_snooze.isoformat() if isinstance(new_snooze, rawdt.datetime) else None,
+        }, context=self._context)
     async def async_action_control(self, operation: str) -> None:
         raise HomeAssistantError(f'Only condition alerts support actions')
     
@@ -1273,9 +1430,10 @@ class AlertBase(AlertCommon, RestoreEntity):
     async def async_ack(self):
         now = dt.now()
         self.ack_int(now)
+        # hm: context added so the timeline can say who acked
         self.hass.bus.async_fire(EVENT_ALERT2_ACK, { 'entity_id': self.entity_id,
                                                      'domain': self.alDomain,
-                                                     'name': self.alName })
+                                                     'name': self.alName }, context=self._context)
 
     async def async_unack(self):
         _LOGGER.info(f'Activity {self.entity_id} got unack')
@@ -1285,9 +1443,10 @@ class AlertBase(AlertCommon, RestoreEntity):
             self.async_write_ha_state()
             self.reminder_check(now)
         # Fire event even if alert wasn't acked in the first place
+        # hm: context added so the timeline can say who unacked
         self.hass.bus.async_fire(EVENT_ALERT2_UNACK, { 'entity_id': self.entity_id,
                                                        'domain': self.alDomain,
-                                                       'name': self.alName })
+                                                       'name': self.alName }, context=self._context)
     async def async_toggle_ack(self):
         if self.is_acked():
             _LOGGER.info(f'Activity {self.entity_id} got toggle_ack. Will call unack')
@@ -1309,6 +1468,9 @@ class AlertBase(AlertCommon, RestoreEntity):
         # purpose of sub_ack_int is so, when someone clicks "Ack All", we don't actually update and log
         # every single alert in existence.
         if self.sub_ack_int():
+            needWrite = True
+        # hm: cleared - its pushes are taken back
+        if self.hm_take_back():
             needWrite = True
         if needWrite:
             self.last_ack_time = now
@@ -1406,6 +1568,8 @@ class AlertBase(AlertCommon, RestoreEntity):
 
         (notifiers, errors, debugInfo) = notifierTemplateToList(self.hass, self.getNotificationVars(reason), notifier_template,
                                                                 sourceTemplate)
+        # hm: a rule's users ("user:<id>", "user:*") are their devices' notifiers as they are now
+        notifiers = hm_push.expand(self.hass, notifiers)
                     
         notifier_list = []
         defer_notifier_list = []
@@ -1695,6 +1859,13 @@ class AlertBase(AlertCommon, RestoreEntity):
                     args['data'] = nDict
             if extra_data is not None:
                 args['data'] = (args['data'] if 'data' in args else {}) | extra_data
+            # hm: tapping the notification opens the alert's link - data.url for the iOS companion
+            # app, data.clickAction for Android. A link set explicitly in `data` wins.
+            hmLink = self.hm_link(mobile=True) or self.hm_link()
+            if hmLink:
+                hmData = args['data'] if 'data' in args else {}
+                if 'url' not in hmData and 'clickAction' not in hmData:
+                    args['data'] = hmData | { 'url': hmLink, 'clickAction': hmLink }
             if self._target_template is not None:
                 try:
                     args['target'] = self._target_template.async_render(variables=notificationVars, parse_result=False)
@@ -1720,10 +1891,16 @@ class AlertBase(AlertCommon, RestoreEntity):
             (notifier_list, defer_notifier_list) = self.getNotifiers(args, reason)
             if len(notifier_list) > 0:
                 _LOGGER.info(f'{self.entity_id} notifying {notifier_list}: {args["message"]}')
+                # hm: timeline entry - who was told, and why (fire, reminder, stop...)
+                self.hass.bus.async_fire(EVENT_HM_NOTIFIED, {
+                    'entity_id': self.entity_id, 'domain': self.alDomain, 'name': self.alName,
+                    'notifiers': list(notifier_list), 'names': hm_push.notifier_names(self.hass, notifier_list),
+                    'reason': reason.name, 'message': args['message'] })
                 async def foo():
                     def reportFn(isInternal, msg):
                         prefix = f'{gAssertMsg} {self.name} ' if isInternal else f'{self.name}: '
                         self.reportIfSafe(DOMAIN, 'error', prefix + msg)
+                    pushed = False
                     for notifier in notifier_list:
                         # legacyNotifierExists() strips a 'notify.' prefix, so this matches
                         # both 'persistent_notification' and 'notify.persistent_notification'.
@@ -1733,7 +1910,15 @@ class AlertBase(AlertCommon, RestoreEntity):
                                 if 'data' not in args:
                                     args['data'] = {}
                                 args['data']['notification_id'] = PersistantNotificationHelper.genNotificationId(self)
-                        await dispatchNotify(self.hass, notifier, args, reportFn)
+                        # hm: a phone's push is the alert's own - tagged, with its buttons (hm_push)
+                        await dispatchNotify(self.hass, notifier, hm_push.push_args(
+                            args, notifier=notifier, entity_id=self.entity_id, reason=reason.name,
+                            can_clear=self.hm_can_clear(), page=self.alertData.topConfig.get('alerts_page')), reportFn)
+                        if hm_push.is_app(notifier) and reason.name in hm_push.LIVE_REASONS and notifier not in self._hm_pushed:
+                            self._hm_pushed.add(notifier)
+                            pushed = True
+                    if pushed:
+                        self.async_write_ha_state()
 
                     #futures = [ self.hass.services.async_call(
                     #    'notify', notifier, # eg 'raw_jtelegram'
@@ -1805,6 +1990,22 @@ class EventAlert(AlertBase):
 
         self.triggerCond = None
 
+        # hm: actions_on, run each time the event alert fires (Alert2 runs them for condition
+        # alerts only, when they turn on). Its mode comes with it - the Alerts card asks for
+        # queued, so every fire runs them, in turn.
+        self.actions_on_script = None
+        if 'actions_on' in config:
+            block = config['actions_on']
+            action_name = f'{entNameFromDN(self.alDomain, self.alName)}_actions_on'
+            self.actions_on_script = script.Script(
+                hass, block['actions'], action_name, 'alert2',
+                running_description='actions_on',
+                script_mode=block[script.CONF_MODE],
+                max_runs=block[script.CONF_MAX],
+                max_exceeded=block[script.CONF_MAX_EXCEEDED],
+                logger=logging.getLogger(f'{__name__}.alert2_{action_name}'),
+                change_listener=self.async_write_ha_state)
+
     async def lateInit(self):
         await super().lateInit()
         
@@ -1845,6 +2046,8 @@ class EventAlert(AlertBase):
         if self.triggerCond:
             self.triggerCond.shutdown()
             self.triggerCond = None
+        if self.actions_on_script:  # hm
+            await self.actions_on_script.async_unload()
             
     async def triggered(self, variables):
         msg = ''
@@ -1868,6 +2071,25 @@ class EventAlert(AlertBase):
         self.hass.bus.async_fire(EVENT_ALERT2_FIRE, { 'entity_id': self.entity_id,
                                                       'domain': self.alDomain,
                                                       'name': self.alName })
+        if self.actions_on_script:  # hm: its actions, each fire
+            create_task(self.hass, DOMAIN, self._hm_run_actions())
+
+    # hm: an event alert's actions - as ConditionAlert.run_actions_on, told what it said
+    async def _hm_run_actions(self):
+        context = Context(parent_id=self._context.id) if self._context else Context()
+        variables = self.getNotificationVars(NotificationReason.Fire)
+        variables.update(self._hm_action_vars())
+        def done(err=None):
+            self.hass.bus.async_fire(EVENT_HM_ACTION, {
+                'entity_id': self.entity_id, 'domain': self.alDomain, 'name': self.alName,
+                'ok': err is None, 'error': str(err) if err is not None else None }, context=context)
+        try:
+            rez = await self.actions_on_script.async_run(variables, context)
+            done()
+            return rez
+        except Exception as err:
+            report(DOMAIN, 'warning', f'{self.name} action_on saw err: {err}')
+            done(err)
     
     def notify_timer_cb(self, now):
         if self.fires_since_last_notify > 0:
@@ -2090,9 +2312,15 @@ class ConditionAlert(AlertBase):
     # State we'd like restored when HA restarts, but not expose as an attribute
     @property
     def extra_restore_state_data(self) -> ExtraStoredData | None:
-        return RestoredExtraData({
-            'threshold_exceeded': self.threshold_exceeded.value,
-        })
+        extra = { 'threshold_exceeded': self.threshold_exceeded.value }
+        # hm: a "For" wait under way, and what it is about (see async_added_to_hass) - only
+        # while there is one, so the data is otherwise exactly upstream's
+        began = self.cond_true_time or getattr(self, '_hm_wait_began', None)
+        if began:
+            extra['hm_cond_true_time'] = began.isoformat()
+            if getattr(self, '_hm_detect_msg', None):
+                extra['hm_detect_msg'] = self._hm_detect_msg
+        return RestoredExtraData(extra)
     
     async def async_will_remove_from_hass(self) -> None:
         await super().async_will_remove_from_hass()
@@ -2103,6 +2331,9 @@ class ConditionAlert(AlertBase):
         if self.cond_true_task:
             cancel_task(DOMAIN, self.cond_true_task)
             self.cond_true_task = None
+            # hm: when the wait began is kept for the restore data: Home Assistant saves it on
+            # the same stop event this shutdown runs on, possibly after it
+            self._hm_wait_began = self.cond_true_time
             self.cond_true_time = None
         if self.condValTracker:
             self.condValTracker.shutdown()
@@ -2161,6 +2392,19 @@ class ConditionAlert(AlertBase):
                     else:
                         report(DOMAIN, 'error', f'{gAssertMsg} {self.name} during restart, saw threshold_exceeded value of {val} with type={type(val)} rather than known int')
         
+        # hm: a "For" wait that was under way when Home Assistant stopped carries on from when
+        # it began: started again from nothing, a restart every few hours kept a 24 h rule
+        # from ever firing. Only at startup - an edited rule starts over - and only while the
+        # alert is off. It is taken up once the alert starts judging: carried on if the
+        # condition still holds, cleared as usual if not (delayed_on_check).
+        if last_state and last_state.state == 'off' and not self.alertData.haStarted:
+            extra = await self.async_get_last_extra_data()
+            extra = extra.as_dict() if extra else {}
+            began = dt.parse_datetime(extra['hm_cond_true_time']) if extra.get('hm_cond_true_time') else None
+            if began is not None:
+                self.cond_true_time = began
+                self._hm_detect_msg = extra.get('hm_detect_msg')
+
         self.added_to_hass_called = True
         await self.addedToHassDone()
 
@@ -2199,6 +2443,15 @@ class ConditionAlert(AlertBase):
                 if self.cond_true_time == None:
                     _LOGGER.debug(f'Activity {self.entity_id} starting delay of {self.delay_on_secs} until turning on')
                     self.cond_true_time = dt.now()
+                    # hm: timeline entry - the condition is true, the alert waits out its delay.
+                    # With what the alert would say now, so the entry names what made it true
+                    # (and "cleared early" names the same thing)
+                    self._hm_detect_msg = self._hm_message_now()
+                    detected = { 'entity_id': self.entity_id, 'domain': self.alDomain, 'name': self.alName,
+                                 'delay_secs': self.delay_on_secs }
+                    if self._hm_detect_msg:
+                        detected['message'] = self._hm_detect_msg
+                    self.hass.bus.async_fire(EVENT_HM_DETECTED, detected)
                     if self.delay_on_secs is None:
                         # delay_on_secs is None only during Alert startup, before the first time the
                         # delay_on_secs template is evaluted.  So pretend we have an unbounded delay.
@@ -2207,6 +2460,11 @@ class ConditionAlert(AlertBase):
                         pass
                     else:
                         self.cond_true_task = create_background_task(self.hass, DOMAIN, self.dodelay(self.delay_on_secs))
+                elif self.cond_true_task is None and self.delay_on_secs is not None:
+                    # hm: a wait carried over a restart (async_added_to_hass): what is left of it
+                    left = max(0, self.delay_on_secs - (dt.now() - self.cond_true_time).total_seconds())
+                    _LOGGER.debug(f'Activity {self.entity_id} resuming delay, {left} s left')
+                    self.cond_true_task = create_background_task(self.hass, DOMAIN, self.dodelay(left))
                 # If cond_true_time is already set, it could just be that
                 # update_state_internal has been called twice for the same "on" state.
                 # E.g., if we exceeded a threshold, then exceed it a bit more.
@@ -2218,6 +2476,12 @@ class ConditionAlert(AlertBase):
             if self.cond_true_time != None:
                 _LOGGER.debug(f'Activity {self.entity_id} stopping turn-on delay')
                 self.cond_true_time = None
+                # hm: timeline entry - the condition cleared before the delay ran out
+                cleared = { 'entity_id': self.entity_id, 'domain': self.alDomain, 'name': self.alName }
+                if getattr(self, '_hm_detect_msg', None):
+                    cleared['message'] = self._hm_detect_msg
+                self._hm_detect_msg = None
+                self.hass.bus.async_fire(EVENT_HM_DETECT_CLEARED, cleared)
                 # self.cond_true_task could be None during startup if delay_on_secs template has not been
                 # evaluted yet.
                 if self.cond_true_task is not None:
@@ -2236,6 +2500,16 @@ class ConditionAlert(AlertBase):
         self.cond_true_task = create_background_task(self.hass, DOMAIN, self.dodelay(remaining_secs))
 
     # Throw exceptions on template errors
+    # hm: what the alert would say right now; '' without a message of its own (the stock
+    # 'turned on' says nothing) or when it cannot render
+    def _hm_message_now(self):
+        if self._message_template is None:
+            return ''
+        try:
+            return (self.get_message_or_exception(NotificationReason.Fire) or '').strip()
+        except TemplateError:
+            return ''
+
     def get_message_or_exception(self, reason: NotificationReason):
         if self._message_template is None:
             return f'turned on'
@@ -2251,23 +2525,33 @@ class ConditionAlert(AlertBase):
         # self._context (from helper/entity.py) is set via async_set_context in the tracker. Hopefully.
         context = Context(parent_id=self._context.id) if self._context else Context()
         notificationVars = self.getNotificationVars(NotificationReason.Fire)
+        notificationVars.update(self._hm_action_vars())  # hm
         def started_action() -> None:
             # This is always a callback from a coro so there is no
             # risk of this running in a thread which allows us to use
             # async_fire_internal
             #self.hass.bus.async_fire_internal(EVENT_AUTOMATION_TRIGGERED, event_data, context=trigger_context)
             pass
+        # hm: timeline entry - whether the actions ran cleanly
+        def hm_action_done(err=None):
+            self.hass.bus.async_fire(EVENT_HM_ACTION, {
+                'entity_id': self.entity_id, 'domain': self.alDomain, 'name': self.alName,
+                'ok': err is None, 'error': str(err) if err is not None else None }, context=context)
         try:
             #with trace.trace_path("action_on"):
-            return await self.actions_on_script.async_run(notificationVars, context, started_action)
+            rez = await self.actions_on_script.async_run(notificationVars, context, started_action)
+            hm_action_done()
+            return rez
             #except ServiceNotFound as err:
             #    report(DOMAIN, 'warning', f'{self.name} action_on tried to invoke missing service: {err.domain}.{err.service}')
             #    automation_trace.set_error(err)
         except (ServiceNotFound, vol.Invalid, HomeAssistantError) as err:
             report(DOMAIN, 'warning', f'{self.name} action_on saw err: {err}')
+            hm_action_done(err)
             #automation_trace.set_error(err)
         except Exception as err:
             report(DOMAIN, 'warning', f'{self.name} action_on saw unexpected err: {err}')
+            hm_action_done(err)
             #automation_trace.set_error(err)
 
     def update_state_internal(self, state:bool):
@@ -2322,6 +2606,12 @@ class ConditionAlert(AlertBase):
                 skip_notify = self.is_acked() and not self.ackRemindersOnly
                 self._notify_pre_debounce(now, reason, msg, skip_notify=skip_notify)
                 self.reminder_check(now)
+                # hm: OK again - its pushes are taken back (written with the state below). With a
+                # done notifier the "OK again" push replaces them instead (the same tag): kept.
+                if self._done_notifier is False:
+                    self.hm_take_back()
+                else:
+                    self._hm_pushed = set()
 
                 if self._used_persistent_notifier and self._persistent_notifier_grouping == PersistantNotificationHelper.CollapseAndDismiss:
                     async def foo():

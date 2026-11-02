@@ -312,6 +312,35 @@ SINGLE_TRACKED_SCHEMA_PRE_NAME = vol.Schema({
     vol.Optional('ack_required'): cv.boolean,
     vol.Optional('ack_reminder_message'): cv.template,
     vol.Optional('reminder_frequency_mins'): vol.All(cv.ensure_list, [vol.Coerce(float)], [vol.Range(min=0.01)]),
+    # hm: fork fields
+    #   link - where the alert's details are: any address, a popup hash included. Template,
+    #          watched on its own: written again whenever it renders differently (e.g. the
+    #          rows of "only what this alert is about"), not only when the alert changes.
+    #   rule - the simple form a rule builder made this alert from, stored untouched so the
+    #          builder can re-open it. The engine never reads it.
+    vol.Optional('link'): cv.template,
+    #   link_mobile - the same place on the phone's dashboard. Phones are what open a
+    #          notification's link, so notifications use it before `link`.
+    vol.Optional('link_mobile'): cv.template,
+    vol.Optional('rule'): dict,
+    #   description - what the alert is for, in plain words, for whoever sees it fire.
+    vol.Optional('description'): cv.string,
+    #   category - the group the alert is filed under in the cards (their Category column and
+    #          filter), apart from its domain, so it can change without changing the alert's
+    #          entity id. Unset: the cards use the domain. The engine ignores it.
+    vol.Optional('category'): cv.string,
+    #   stays_firing_mins - an event alert's time as "firing" after it fires, in the cards (an
+    #          event has no end of its own): minutes, 0 = until someone clears it. Unset: the
+    #          cards use a day. The engine ignores it.
+    vol.Optional('stays_firing_mins'): vol.All(vol.Coerce(float), vol.Range(min=0)),
+    #   allow_clear - whether a person may clear the alert (reset it to OK) while it fires.
+    #          Unset: yes for an event alert, no for a condition alert (that one turns OK by
+    #          itself once its condition is false). Read by the cards; the engine ignores it.
+    vol.Optional('allow_clear'): cv.boolean,
+    #   overlay - the dashboards (their url_paths, e.g. tablet-dashboard) that show a banner
+    #          across the top while the alert fires and is neither cleared nor snoozed. Drawn
+    #          by the Alerts card on every dashboard; the engine only passes it on.
+    vol.Optional('overlay'): vol.All(cv.ensure_list, [cv.string]),
 })
 
 DOMAIN_NAME_DICT = {
@@ -361,6 +390,8 @@ SINGLE_ALERT_SCHEMA_EVENT_PRE_NAME = SINGLE_ALERT_SCHEMA_PRE_NAME.extend({
     #vol.Required('trigger'): jProtectedTrigger,
     vol.Optional('condition'): boolTemplate,
     vol.Optional('early_start'): cv.boolean,
+    # hm: an event alert runs actions too - each time it fires
+    vol.Optional('actions_on'): ACTIONS_BLOCK,
 })
 #SINGLE_ALERT_SCHEMA_EVENT = SINGLE_ALERT_SCHEMA_EVENT_PRE_NAME.extend({
 #    vol.Required('domain'): jDomain,
@@ -446,6 +477,22 @@ TOP_LEVEL_SCHEMA = vol.Schema({
     vol.Optional('skip_internal_errors'): cv.boolean,
     vol.Optional('notifier_startup_grace_secs'): vol.All(vol.Coerce(float), vol.Range(min=0.)),
     vol.Optional('defer_startup_notifications'): vol.Any(cv.boolean, jstringList),
+    # hm: true = warnings fire the alert2_error alert and no alert2_warning alert is made.
+    #     YAML only (the UI does not offer it).
+    vol.Optional('merge_warnings_into_errors'): cv.boolean,
+    # hm: a folder (relative to the config dir) holding every UI rule as a YAML file, read
+    #     back at start-up and reload (hm_rules.py). YAML only.
+    vol.Optional('rules_dir'): cv.string,
+    # hm: seconds after Home Assistant has started before alerts judge their conditions and
+    #     triggers (0 = at once, as upstream). Meanwhile each keeps the state it was restored
+    #     with, so an integration still loading (a calendar not yet fetched, a summary sensor
+    #     not yet filled) cannot resolve and re-activate it. YAML only.
+    vol.Optional('start_delay_secs'): vol.All(vol.Coerce(float), vol.Range(min=0.)),
+    # hm: the phones' Alerts page (an address, e.g. /mobile-dashboard/alerts). A push to a
+    #     phone opens the alert there when tapped (unless the alert has a link of its own), and
+    #     its "Snooze: Custom…" button opens the alert there with its snooze menu (hm_push).
+    #     Unset: no such button, and a tap opens only a link. YAML only.
+    vol.Optional('alerts_page'): cv.string,
 })
 
 TOP_LEVEL_SCHEMA_INTERNAL = TOP_LEVEL_SCHEMA.extend({

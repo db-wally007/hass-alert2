@@ -21,6 +21,8 @@ from   homeassistant.const import (
     EVENT_HOMEASSISTANT_STARTED
 )
 from   homeassistant.core import HomeAssistant, Event, SupportsResponse
+from   homeassistant.core import callback  # hm
+from   homeassistant.components import websocket_api  # hm: the rule editor's users
 from   homeassistant.exceptions import HomeAssistantError
 from   homeassistant.helpers import discovery
 import homeassistant.helpers.config_validation as cv
@@ -31,6 +33,7 @@ from   homeassistant.helpers.service import async_register_admin_service
 from   homeassistant.helpers.typing import ConfigType
 from   homeassistant.helpers import template as template_helper
 from   homeassistant.helpers import trigger as trigger_helper
+from   homeassistant.helpers.event import async_call_later  # hm: start_delay_secs
 import homeassistant.util.dt as dt
 
 from .config import (
@@ -49,6 +52,9 @@ from .entities import (
     notifierExists, dispatchNotify
 )
 from .ui import ( UiMgr )
+from .hm_timeline import ( TimelineMgr )  # hm: fork addition
+from . import hm_push  # hm: fork addition - pushes to phones and their buttons
+from .hm_reminders import ( ReminderMgr )  # hm: fork addition - calendar reminders for other cards
 from .util import (
     report,
     create_task,
@@ -491,9 +497,15 @@ class Alert2Data:
         self.sensorComponent = EntityComponent[AlertGenerator](_LOGGER, 'sensor', hass)
         self.binarySensorDict = None
         self.haStarted = False
+        # hm: start_delay_secs - when (loop time) alerts may start judging after HA started,
+        # and whether that moment has come
+        self.hmLiveAt = None
+        self.hmLive = False
         self.delayedNotifierMgr = None
         self.declEvMultiArr = [] # cumulative alert configs from all calls to alert.declareEventMulti
         self.uiMgr = None
+        self.hmTimeline = None  # hm: per-alert timeline (hm_timeline.py)
+        self.hmReminders = None  # hm: calendar reminders API (hm_reminders.py)
         self.rawYamlBaseTopConfig = None # stores global settings not including the UI config
         self.rawTopConfig = None
         self.topConfig = None # processed Schema() for defaults and top-level options
@@ -569,6 +581,12 @@ class Alert2Data:
             tmpYamlConfig['notifier_startup_grace_secs'] = self._rawYamlConfig['notifier_startup_grace_secs']
         if 'defer_startup_notifications' in self._rawYamlConfig:
             tmpYamlConfig['defer_startup_notifications'] = self._rawYamlConfig['defer_startup_notifications']
+        if 'merge_warnings_into_errors' in self._rawYamlConfig:  # hm:
+            tmpYamlConfig['merge_warnings_into_errors'] = self._rawYamlConfig['merge_warnings_into_errors']
+        if 'start_delay_secs' in self._rawYamlConfig:  # hm:
+            tmpYamlConfig['start_delay_secs'] = self._rawYamlConfig['start_delay_secs']
+        if 'alerts_page' in self._rawYamlConfig:  # hm:
+            tmpYamlConfig['alerts_page'] = self._rawYamlConfig['alerts_page']
         try:
             self.rawYamlBaseTopConfig = tmpYamlConfig
             self.rawTopConfig = tmpYamlConfig
@@ -581,6 +599,14 @@ class Alert2Data:
         isFirstInit = (self.delayedNotifierMgr is None)
         if isFirstInit:
             self.uiMgr = UiMgr(self._hass, self)
+            # hm: start recording before any alert can change state; once only, a reload
+            # keeps the same recorder (and the history it holds)
+            self.hmTimeline = TimelineMgr(self._hass)
+            await self.hmTimeline.async_start()
+            # hm: reminders on calendar events (the Simple Schedule card's Alert section);
+            # before the UI rules are read, so it hears that they were
+            self.hmReminders = ReminderMgr(self._hass, self)
+            self.hmReminders.start()
         rez = await self.uiMgr.startup()
         if rez is not None:
             _LOGGER.error(f'UI startup exception: {rez}')
@@ -594,6 +620,9 @@ class Alert2Data:
             
         if not self.topConfig['skip_internal_errors']:
             for internalType in ['error', 'warning', 'global_exception']:
+                # hm: merged warnings go to alert2_error, so there is no warning alert to make
+                if internalType == 'warning' and self.topConfig.get('merge_warnings_into_errors'):
+                    continue
                 cfgObj = None
                 if 'tracked' in self._rawYamlConfig and isinstance(self._rawYamlConfig['tracked'], list):
                     for obj in self._rawYamlConfig['tracked']:
@@ -648,6 +677,10 @@ class Alert2Data:
             self._hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, self.haStartedEv)
         
             self._hass.bus.async_listen(EVENT_TYPE, self.handle_event_report)
+            # hm: a button pressed on an alert's push (Clear, a snooze) - see hm_push
+            self._hass.bus.async_listen(hm_push.ACTION_EVENT, self.hmPushAction)
+            # hm: the users a rule can push to, for the rule editor
+            websocket_api.async_register_command(self._hass, hm_push.ws_push_users)
             # Note - calls to report() use the event EVENT_TYPE, not the service call, so this schema
             # is never used unless someone happens to call the alert2.report service.
             REPORT_SCHEMA = vol.Schema({
@@ -862,6 +895,8 @@ class Alert2Data:
                     else:
                         aCfg = SINGLE_ALERT_SCHEMA_EVENT_NO_GEN(obj)
                         aCfg['trigger'] = await trigger_helper.async_validate_trigger_config(self._hass, aCfg['trigger'])
+                        # hm: its actions_on, as a condition alert's
+                        await async_validate_condition_alert(self._hass, aCfg)
                 else:
                     if 'generator' in obj:
                         aCfg = SINGLE_ALERT_SCHEMA_CONDITION_GEN(obj)
@@ -1049,11 +1084,30 @@ class Alert2Data:
         # By the time EVENT_HOMEASSISTANT_STARTED has fired, the binary sensor should have initialized
         _LOGGER.debug(f'HA started')
         self.haStarted = True
+        # hm: alerts start judging start_delay_secs from now (they ask hmStartDelayLeft)
+        delay = float((self.topConfig or {}).get('start_delay_secs', 0) or 0)
+        if delay > 0:
+            self.hmLiveAt = self._hass.loop.time() + delay
+            async_call_later(self._hass, delay, self._hmGoLive)
+        else:
+            self._hmGoLive()
         if self.binarySensorDict is not None:
             self.binarySensorDict['hastarted']._attr_is_on = True
             self.binarySensorDict['hastarted'].async_write_ha_state()
         self.delayGcRegistry()
         
+    def hmStartDelayLeft(self) -> float:
+        """hm: seconds until alerts may judge after HA started (0: now)."""
+        if self.hmLive or self.hmLiveAt is None:
+            return 0.
+        return max(0., self.hmLiveAt - self._hass.loop.time())
+
+    @callback
+    def _hmGoLive(self, _now=None):
+        self.hmLive = True
+        if self.hmTimeline:
+            self.hmTimeline.go_live()
+
     #def startShutdown(self, event):
     #    self._hass.loop.call_soon_threadsafe(self.shutdown)
     async def shutdown(self, event):
@@ -1061,6 +1115,10 @@ class Alert2Data:
         await self.shutdown_alerts()
         if self.uiMgr:
             self.uiMgr.shutdown()
+        if self.hmTimeline:  # hm
+            self.hmTimeline.shutdown()
+        if self.hmReminders:  # hm
+            self.hmReminders.shutdown()
         for atask in global_tasks:
             atask.cancel()
             
@@ -1194,6 +1252,30 @@ class Alert2Data:
                 entity.ack_int(now)
         
 
+    # hm: a built-in alert (alert2.error, global_exception, warning) whose settings were changed
+    # in the UI takes them now - upstream applies them only at the next reload. Not one set in
+    # the YAML `tracked:` (that wins at every start, so the change would not last), nor one
+    # that does not exist (skip_internal_errors, merged warnings).
+    async def hmRedeclareInternal(self, preppedConfig):
+        name = preppedConfig['name']
+        yaml = self._rawYamlConfig.get('tracked') if isinstance(self._rawYamlConfig, dict) else None
+        if isinstance(yaml, list) and any(isAlert2Internal(o) and o.get('name') == name for o in yaml):
+            return
+        if DOMAIN not in self.tracked or name not in self.tracked[DOMAIN]:
+            return
+        err = await self.undeclareAlert(DOMAIN, name, doReport=False)
+        if err:
+            report(DOMAIN, 'error', f'{gAssertMsg} could not apply the new settings of {name}: {err}')
+            return
+        await self.declareAlert(preppedConfig, isTracked=True, fromUI=True)
+
+    # hm: a button pressed on a phone's push; a failure is the alerting's own error
+    async def hmPushAction(self, event):
+        try:
+            await hm_push.handle_action(self._hass, event)
+        except Exception as ex:
+            report(DOMAIN, 'error', f'A push button ({event.data.get("action")}) failed: {ex}')
+
     async def handle_service_report(self, call):
         return await self.handle_report_int(call.data, 'service-call')
     async def handle_event_report(self, ev: Event):
@@ -1215,7 +1297,10 @@ class Alert2Data:
             if isAlert2Internal(evdata): # This is treating evdata is if it is part of an alert config so we can test for domain/name
                 # The internal error was logged back up in report(), so no need to log again
                 return
-        
+        # hm: one alert for the engine's own problems: a warning fires alert2_error
+        if domain == DOMAIN and name == 'warning' and self.topConfig.get('merge_warnings_into_errors'):
+            name = 'error'
+
         message = ''
         if 'message' in evdata:
             if not isinstance(evdata['message'], str):

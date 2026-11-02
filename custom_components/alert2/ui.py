@@ -33,6 +33,8 @@ from .config import ( TOP_LEVEL_SCHEMA, DEFAULTS_SCHEMA, SINGLE_TRACKED_SCHEMA_P
                       SINGLE_ALERT_SCHEMA_EVENT_NO_GEN, THRESHOLD_SCHEMA,
                       GENERATOR_EXTRA, GENERATOR_EXTRA_CONDITION, NO_GENERATOR_EXTRA_CONDITION )
 from .util import (     GENERATOR_DOMAIN )
+from . import hm_rules  # hm: rules as files
+from homeassistant.helpers import restore_state  # hm: an edited rule starts afresh
 from .entities import (notifierTemplateToList, renderResultToList, generatorElemToVars, AlertGenerator, Tracker,
                        processSupersedes, getField, expandDataDict, NotificationReason, entNameFromDN, AlertBase,
                        getPreferredEntityId)
@@ -64,13 +66,15 @@ class ManageAlertView(HomeAssistantView):
             rez = self.uiMgr.loadAlert(data['load']['uiId'])
             return self.json(rez)
         if 'create' in data:
-            rez = await self.uiMgr.createAlert(data['create'])
+            # hm: who made / deleted it, for its timeline
+            rez = await self.uiMgr.createAlert(data['create'], hmUser=request.get('hass_user'))
             return self.json(rez)
         if 'delete' in data:
-            rez = await self.uiMgr.deleteAlert(data['delete']['uiId'])
+            rez = await self.uiMgr.deleteAlert(data['delete']['uiId'], hmUser=request.get('hass_user'))
             return self.json(rez)
         if 'update' in data:
-            rez = await self.uiMgr.updateAlert(data['update']['uiId'], data['update']['cfg'])
+            # hm: who edited it, for its timeline
+            rez = await self.uiMgr.updateAlert(data['update']['uiId'], data['update']['cfg'], hmUser=request.get('hass_user'))
             return self.json(rez)
         if 'validate' in data:
             rez = await self.uiMgr.validateAlert(data['validate'])
@@ -108,7 +112,8 @@ class SaveDefaultsView(HomeAssistantView):
 def prepStrConfigField(fname, tval, doReport=True):
     if fname in [ 'notifier', 'summary_notifier', 'done_notifier', 'reminder_frequency_mins',
                   'throttle_fires_per_mins',
-                  'generator', 'defer_startup_notifications' ]:
+                  'generator', 'defer_startup_notifications',
+                  'overlay' ]:  # hm: overlay is a list, like the notifiers
         if template_helper.is_template_string(tval):
             return tval
         return parse_yaml(tval)
@@ -125,7 +130,8 @@ def prepStrConfigField(fname, tval, doReport=True):
         if stripped_tval.startswith('{%') or stripped_tval.startswith('{{') or stripped_tval.startswith('{#') :
             return tval
         return parse_yaml(tval)
-    elif fname in [ 'trigger', 'trigger_on', 'trigger_off', 'exception_ignore_regexes', 'actions_on' ]:
+    elif fname in [ 'trigger', 'trigger_on', 'trigger_off', 'exception_ignore_regexes', 'actions_on',
+                    'rule' ]:  # hm: rule arrives as JSON/YAML text, like the other structured fields
         return parse_yaml(tval)
     elif fname in [ 'annotate_messages', 'ack_required', 'manual_off', 'manual_on', 'priority', 'icon', 'friendly_name',
                     'title', 'target', 'domain', 'name', 'message', 'done_message',
@@ -139,7 +145,9 @@ def prepStrConfigField(fname, tval, doReport=True):
                     'threshold.hysteresis', 'threshold.maximum', 'threshold.minimum', 'threshold.value',
                     'hysteresis', 'maximum', 'minimum', 'value',
                     'delay_on_secs',
-                    'generator_name', 'skip_internal_errors', 'notifier_startup_grace_secs' ]:
+                    'generator_name', 'skip_internal_errors', 'notifier_startup_grace_secs',
+                    'link', 'link_mobile', 'description', 'allow_clear', 'category',
+                    'stays_firing_mins' ]:  # hm: plain strings, no YAML parsing
         # Should not need yaml parsing
         return tval
     elif fname in [ 'display_msg', 'reminder_message' ]:
@@ -721,6 +729,8 @@ class UiMgr:
         self.storeFatalErr = False
         self.alerts = [] # { ent (may be None), info }
         self.displayMsgWsMgr = DisplayMsgSocketMgr(hass, alertData)
+        self.hmRulesDir = None  # hm: rules as files (hm_rules.py), when rules_dir is set
+        self.hmFiles = {}       # hm: uiId -> its file name in hmRulesDir
         
     async def startup(self):
         # Store handles the case where there may be a write pending
@@ -752,7 +762,99 @@ class UiMgr:
                 self.storeData['nextAlertUiId'] = maxUid + 1
             if len(uids) != len(set(uids)):
                 report(DOMAIN, 'error', f'{gAssertMsg} ui load appears to be duplicate uiId: {uids}')
+        await self._hmRulesStartup()
+        self._hmChanged()
         return None
+
+    def _hmChanged(self):
+        """hm: the UI rules changed - the calendar reminders' followers hear it (hm_reminders)."""
+        reminders = getattr(self._alertData, 'hmReminders', None)
+        if reminders:
+            reminders.changed()
+
+    # hm: rules as files - see hm_rules.py. The folder is read here, at every start and
+    # reload, and its rules replace the store's. The first start with the option set writes
+    # the store's rules out first. A folder that is not there replaces nothing: a mistyped
+    # rules_dir must not read as "every rule deleted".
+    async def _hmRulesStartup(self):
+        raw = self._alertData._rawYamlConfig
+        rdir = raw.get('rules_dir') if isinstance(raw, dict) else None
+        self.hmRulesDir = self._hass.config.path(rdir) if rdir else None
+        self.hmFiles = {}
+        if not self.hmRulesDir:
+            return
+        if 'hm_rules_dir' not in self.storeData['oneTime']:
+            # First start with the option: the store's rules are written out, joining
+            # whatever the folder already holds.
+            try:  # the folder is made even with no rule to put in it yet
+                await self._hass.async_add_executor_job(hm_rules.make_dir, self.hmRulesDir)
+            except OSError as ex:
+                self._alertData.earlyErrors.append(f'rules_dir {rdir}: {ex}')
+                self.hmRulesDir = None
+                return
+            written = [await self._hmWrite(info, early=True) for info in self.storeData['alertInfos']]
+            if not all(written):
+                return  # the store stays in charge until every rule is safely out
+            self.setOneTime('hm_rules_dir')
+        try:
+            files, errors = await self._hass.async_add_executor_job(hm_rules.read_dir, self.hmRulesDir)
+        except OSError as ex:
+            self._alertData.earlyErrors.append(f'rules_dir {rdir}: {ex}')
+            return
+        for err in errors:
+            self._alertData.earlyErrors.append(f'rules_dir {rdir}: {err}')
+        if files is None:
+            self._alertData.earlyErrors.append(
+                f'rules_dir {rdir}: no such folder - keeping the rules the UI store holds')
+            self.hmRulesDir = None
+            return
+        known = {hm_rules.rule_key(i['cfg']): i['uiId'] for i in self.storeData['alertInfos']}
+        infos = []
+        for fn, cfg in files:
+            uiId = known.pop(hm_rules.rule_key(cfg), None)
+            if uiId is None:
+                uiId = self.storeData['nextAlertUiId']
+                self.storeData['nextAlertUiId'] += 1
+            infos.append({'uiId': uiId, 'cfg': cfg})
+            self.hmFiles[uiId] = fn
+        if infos != self.storeData['alertInfos']:
+            self.storeData['alertInfos'] = infos
+            self._store.async_delay_save(self._data_to_save, SAVE_DELAY)
+        self.alerts = [{'ent': None, 'info': x} for x in infos]
+
+    async def _hmWrite(self, info, early=False):
+        """True once the rule's file is written (or there is no folder to write to).
+        `early`: during start-up, before report() works - the error waits in earlyErrors."""
+        if not self.hmRulesDir:
+            return True
+        cfg = info['cfg']
+        fn = hm_rules.file_name(cfg)
+        old = self.hmFiles.get(info['uiId'])
+        try:
+            eid = getPreferredEntityId(cfg.get('domain', ''), cfg.get('name', '')) \
+                if 'name' in cfg else cfg.get('generator_name', '')
+            text = hm_rules.render(cfg, eid)
+            await self._hass.async_add_executor_job(hm_rules.write_rule, self.hmRulesDir, fn, text)
+            if old and old != fn:  # renamed: the old name's file goes
+                await self._hass.async_add_executor_job(hm_rules.remove_rule, self.hmRulesDir, old)
+        except (OSError, ValueError) as ex:
+            msg = f'rules_dir: could not write {fn}: {ex}'
+            if early:
+                self._alertData.earlyErrors.append(msg)
+            else:
+                report(DOMAIN, 'error', msg)
+            return False
+        self.hmFiles[info['uiId']] = fn
+        return True
+
+    async def _hmRemove(self, uiId):
+        fn = self.hmFiles.pop(uiId, None)
+        if not self.hmRulesDir or not fn:
+            return
+        try:
+            await self._hass.async_add_executor_job(hm_rules.remove_rule, self.hmRulesDir, fn)
+        except OSError as ex:
+            report(DOMAIN, 'error', f'rules_dir: could not remove {fn}: {ex}')
         
     def shutdown(self):
         #create_task(self._hass, DOMAIN, self.async_shutdown())
@@ -888,7 +990,7 @@ class UiMgr:
     def alertCreated(self, domain, name):
         self.displayMsgWsMgr.reloadSingleIfExists(domain, name)
     
-    async def createAlert(self, acfg):
+    async def createAlert(self, acfg, hmUser=None):
         if self.storeFatalErr:
             return {'error': f'UI data store failed to load. Preventing updates to avoid overwriting' }
         preppedConfig = await self.validateAlert(acfg)
@@ -901,6 +1003,9 @@ class UiMgr:
         
         if isAlert2Internal(preppedConfig):
             newEnt = await self.declareInternalAlert(preppedConfig, doReport=False)
+            # hm: the live alert takes these settings now, not at the next reload
+            if isinstance(newEnt, Entity):
+                await self._alertData.hmRedeclareInternal(preppedConfig)
         else:
             newEnt = await self._alertData.declareAlert(preppedConfig, doReport=False, fromUI=True)
         if not isinstance(newEnt, Entity):
@@ -912,6 +1017,11 @@ class UiMgr:
         self.alerts.append({ 'ent': newEnt, 'info': newInfo })
         
         self._store.async_delay_save(self._data_to_save, SAVE_DELAY)
+        await self._hmWrite(newInfo)  # hm: rules as files
+        if self._alertData.hmTimeline and getattr(newEnt, 'entity_id', None):  # hm: timeline
+            self._alertData.hmTimeline.created(newEnt.entity_id, getattr(hmUser, 'name', None),
+                                               acfg.get('friendly_name') or acfg.get('name'))
+        self._hmChanged()
         return { 'uiId': newInfo['uiId'] }
 
     async def deleteAlertInt(self, uiId, verb):
@@ -936,7 +1046,7 @@ class UiMgr:
                 return (None, None, errMsg)
         return (storeIdx, listIdx, None)
     
-    async def updateAlert(self, uiId, acfg):
+    async def updateAlert(self, uiId, acfg, hmUser=None):
         if self.storeFatalErr:
             return {'error': f'UI data store failed to load. Preventing updates to avoid overwriting' }
         # Validate alert before call undeclareAlert so hopefully won't end up returning an error
@@ -948,9 +1058,17 @@ class UiMgr:
         (storeIdx, listIdx, errMsg) = await self.deleteAlertInt(uiId, 'update')
         if errMsg:
             return {'error': errMsg}
+        # hm: an edited rule starts from nothing - not from the state the old alert was removed
+        # with (Home Assistant keeps it for an entity added back) - and judges at once
+        oldEidHm = getattr(self.alerts[listIdx]['ent'], 'entity_id', None)
+        if oldEidHm:
+            restore_state.async_get(self._hass).last_states.pop(oldEidHm, None)
         
         if isAlert2Internal(preppedConfig):
             newEnt = await self.declareInternalAlert(preppedConfig, doReport=False)
+            # hm: the live alert takes its new settings now, not at the next reload
+            if isinstance(newEnt, Entity):
+                await self._alertData.hmRedeclareInternal(preppedConfig)
         else:
             newEnt = await self._alertData.declareAlert(preppedConfig, doReport=False, fromUI=True)
 
@@ -961,14 +1079,26 @@ class UiMgr:
         if not isinstance(newEnt, Entity):
             return {'error': newEnt}
 
+        # hm: an edited rule starts a new timeline, headed by the edit and who made it (an
+        # alert whose id changed leaves its old one behind)
+        hmTl = self._alertData.hmTimeline
+        if hmTl:
+            oldEid = getattr(self.alerts[listIdx]['ent'], 'entity_id', None)
+            newEid = newEnt.entity_id or getPreferredEntityId(preppedConfig['domain'], preppedConfig['name'])
+            if oldEid and oldEid != newEid:
+                hmTl.forget(oldEid)
+            hmTl.edited(newEid, getattr(hmUser, 'name', None), acfg.get('friendly_name') or acfg.get('name'))
+
         _LOGGER.info(f'Lifecycle updated alert {newEnt.entity_id} via UI')
         self.storeData['alertInfos'][storeIdx]['cfg'] = acfg
         self.alerts[listIdx]['ent'] = newEnt
         
         self._store.async_delay_save(self._data_to_save, SAVE_DELAY)
+        await self._hmWrite(self.storeData['alertInfos'][storeIdx])  # hm: rules as files
+        self._hmChanged()
         return {}
 
-    async def deleteAlert(self, uiId):
+    async def deleteAlert(self, uiId, hmUser=None):
         if self.storeFatalErr:
             return {'error': f'UI data store failed to load. Preventing updates to avoid overwriting' }
         (storeIdx, listIdx, errMsg) = await self.deleteAlertInt(uiId, 'delete')
@@ -976,10 +1106,19 @@ class UiMgr:
             return {'error': errMsg}
 
         ename = getAlertName(self.alerts[listIdx])
+        # hm: a deleted rule's timeline ends with its deletion (and stays for the history, until
+        # it ages out)
+        hmEnt = self.alerts[listIdx]['ent']
+        if self._alertData.hmTimeline and getattr(hmEnt, 'entity_id', None):
+            hmCfg = self.storeData['alertInfos'][storeIdx]['cfg']
+            self._alertData.hmTimeline.deleted(hmEnt.entity_id, getattr(hmUser, 'name', None),
+                                               hmCfg.get('friendly_name') or hmCfg.get('name'))
         del self.storeData['alertInfos'][storeIdx]
         del self.alerts[listIdx]
         self._store.async_delay_save(self._data_to_save, SAVE_DELAY)
+        await self._hmRemove(uiId)  # hm: rules as files
         _LOGGER.info(f'Lifecycle deleted alert {ename} via UI')
+        self._hmChanged()
         return {}
 
     def _data_to_save(self):
