@@ -1112,6 +1112,9 @@ class AlertBase(AlertCommon, RestoreEntity):
         # hm: the dashboards that show a banner while it fires (attribute `overlay`, their
         # url_paths) - drawn by the Alerts card; the engine only passes it on
         self._hm_overlay = config['overlay'] if 'overlay' in config else None
+        # hm: the dashboards that open the alert's link instead of a banner (attribute
+        # `overlay_open`, as `overlay`) - the Alerts card does it; the engine passes it on
+        self._hm_overlay_open = config['overlay_open'] if 'overlay_open' in config else None
         # hm: the phones (app notifiers) holding a push of it, to take back once it is over
         # (attribute `pushed_to`, only while there are any - see hm_push)
         self._hm_pushed = set()
@@ -1339,6 +1342,8 @@ class AlertBase(AlertCommon, RestoreEntity):
             baseDict['allow_clear'] = self._hm_allow_clear
         if self._hm_overlay:
             baseDict['overlay'] = list(self._hm_overlay)
+        if self._hm_overlay_open:
+            baseDict['overlay_open'] = list(self._hm_overlay_open)
         if self._hm_pushed:
             baseDict['pushed_to'] = sorted(self._hm_pushed)
         baseDict.update(self.more_state_attributes())

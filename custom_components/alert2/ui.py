@@ -113,7 +113,7 @@ def prepStrConfigField(fname, tval, doReport=True):
     if fname in [ 'notifier', 'summary_notifier', 'done_notifier', 'reminder_frequency_mins',
                   'throttle_fires_per_mins',
                   'generator', 'defer_startup_notifications',
-                  'overlay' ]:  # hm: overlay is a list, like the notifiers
+                  'overlay', 'overlay_open' ]:  # hm: overlay(_open) is a list, like the notifiers
         if template_helper.is_template_string(tval):
             return tval
         return parse_yaml(tval)

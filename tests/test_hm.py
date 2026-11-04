@@ -195,6 +195,29 @@ async def test_hm_stays_firing_mins_attribute(hass, service_calls):
     assert 'error' in bad
 
 
+async def test_hm_overlay_open_attribute(hass, service_calls):
+    # The dashboards that open the link instead of a banner: a list as `overlay` (UI JSON text
+    # in, attribute out), no attribute when unset or empty - a rule without it reads as before.
+    gad = await start(hass, [])
+    cfg = {'domain': 'rule', 'name': 'ev1', 'friendly_name': 'Doorbell', 'notifier': 'null',
+           'trigger': '[{"trigger": "event", "event_type": "test_ring"}]',
+           'overlay': '["mobile-dashboard"]', 'overlay_open': '["tablet-dashboard", "dashboard-clock/home"]'}
+    rez = await gad.uiMgr.createAlert(dict(cfg))
+    assert 'error' not in rez, rez
+    await hass.async_block_till_done()
+    attrs = hass.states.get('alert2.rule_ev1').attributes
+    assert attrs['overlay_open'] == ['tablet-dashboard', 'dashboard-clock/home']
+    assert attrs['overlay'] == ['mobile-dashboard']
+    rez2 = await gad.uiMgr.updateAlert(rez['uiId'], dict(cfg, overlay_open='[]'))
+    assert 'error' not in rez2, rez2
+    await hass.async_block_till_done()
+    assert 'overlay_open' not in hass.states.get('alert2.rule_ev1').attributes
+    rez3 = await gad.uiMgr.updateAlert(rez['uiId'], {k: v for k, v in cfg.items() if k != 'overlay_open'})
+    assert 'error' not in rez3, rez3
+    await hass.async_block_till_done()
+    assert 'overlay_open' not in hass.states.get('alert2.rule_ev1').attributes
+
+
 async def test_hm_rule_edited_before_ha_started(hass, service_calls):
     # A condition alert waits for HA to finish starting before it watches its condition.
     # Edited (so removed and made again) in that window, the removed one must not wake up.

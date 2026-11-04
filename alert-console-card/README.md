@@ -10,7 +10,7 @@ Plain JavaScript, no build step.
 ## Install
 
 1. Add a dashboard resource:
-   `/local/hass-alert2/alert-console-card/alert-console-card.js?v=1.0.0`, type
+   `/local/hass-alert2/alert-console-card/alert-console-card.js?v=1.1.0`, type
    *JavaScript module*. Raise the `?v=` after every update, or browsers keep the old module.
 2. Also load [state-history-card](https://github.com/db-wally007/state-history-card)
    (≥ 0.1.6). It draws each alert's firing/OK history.
@@ -173,7 +173,8 @@ button, the Alerts | Health switch, a round "+" for New alert):
   a firing alert left to Snooze or Clear it.
 - History is a timeline by day; an event's line stops at two lines.
 - An alert or an event opens in a bottom sheet just tall enough for its own part; scrolling
-  raises it to the full screen. An alert: status, message, the tablet's buttons - Clear while
+  raises it to the full screen. An alert: its status under its name, its message on white
+  (category and priority are in Rule Details), the tablet's buttons - Clear while
   it fires (where the rule allows it) and Snooze always (a flood of alerts is often known in
   advance; *Notifications on* in its place if the alert's notifications were switched off) -
   then Edit / Link (a rule made in this card; the alert's link), then Timeline and Rule
@@ -201,10 +202,11 @@ not on an Alerts view (`/<dashboard>/alerts`) that lists it anyway.
   its Home page (`/<dashboard>/home`) and not while a pop-up is open there (any `#…` address).
   Stored in `overlay` as `tablet-dashboard` or `tablet-dashboard/home`.
 - **Looks:** white, as an entity that is on, floating above the page: the alert's tile, its
-  name alone (what it says is in its sheet) and an **Open** button when it has a link - the
-  mobile link on a phone-sized screen or the mobile dashboard, the desktop one elsewhere.
-  Wider than a phone (over 700px) it is sized to be read across a room - the name as big as a
-  section heading, and how long ago it fired. Solid colours, no blur behind it.
+  name with what it says on one line under it (as an iOS notification; several lines are
+  joined) and an **Open** button when it has a link - the mobile link on a phone-sized screen
+  or the mobile dashboard, the desktop one elsewhere. Wider than a phone (over 700px) it is
+  sized to be read across a room, and shows how long ago it fired. Solid colours, no blur
+  behind it.
 - **Tap:** the alert's sheet opens right there (the phone layout's, over the page - a hidden
   copy of this card, fed by Home Assistant only while its sheet or a menu is open, and dropped
   when the page changes): Clear, Snooze, Edit, Link as on the Alerts page.
@@ -212,6 +214,15 @@ not on an Alerts view (`/<dashboard>/alerts`) that lists it anyway.
 - **Swipe up:** puts it away on this device until the alert fires again (kept in the
   browser's `localStorage`, `hm-alert-banner-away`).
 - It leaves by itself once the alert is OK, cleared or snoozed.
+- **Open link on** (*Notify*, its own row and dashboard list under *Banner on*; the fork's
+  `overlay_open`, stored as `overlay`): those dashboards go straight to the alert's link the
+  moment it fires, instead of the banner (the doorbell's camera pop-up on the wall tablet), and
+  back where they were after a minute without a touch, so a camera is not left streaming to an
+  empty room. A touch anywhere gives it another minute; going somewhere else leaves it alone.
+  A dashboard is in one list or the other - picked in one, it leaves the other. *Open from:
+  Home page* opens it only from the Home page with no pop-up open. With no link, those
+  dashboards show the banner. Only a firing seen while the page is open opens: a page reloaded
+  later, or a step to the Home page, is not taken over.
 
 ## New alert
 

@@ -341,6 +341,11 @@ SINGLE_TRACKED_SCHEMA_PRE_NAME = vol.Schema({
     #          across the top while the alert fires and is neither cleared nor snoozed. Drawn
     #          by the Alerts card on every dashboard; the engine only passes it on.
     vol.Optional('overlay'): vol.All(cv.ensure_list, [cv.string]),
+    #   overlay_open - the dashboards (as `overlay`; a dashboard is in one or the other) that,
+    #          instead of a banner, open the alert's link when it fires - the doorbell's camera
+    #          on a wall tablet - and go back after a minute without a touch. Without a link they
+    #          show the banner. Done by the Alerts card; the engine only passes it on.
+    vol.Optional('overlay_open'): vol.All(cv.ensure_list, [cv.string]),
 })
 
 DOMAIN_NAME_DICT = {

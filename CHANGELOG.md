@@ -4,6 +4,30 @@ Releases of this fork of [redstone99/hass-alert2](https://github.com/redstone99/
 A release is `v<upstream version>+hm.<n>`; alert-console-card carries its own version.
 Everything listed is add-only - upstream behaviour is unchanged unless it is used.
 
+## [1.22+hm.2] - 2026-11-04
+
+On Alert2 1.22, with alert-console-card 1.1.0.
+
+### Added
+
+- **Open link on** (Notify; rule field `overlay_open`, a list of dashboards as `overlay`): those
+  dashboards go straight to the alert's link the moment it fires, instead of a banner - the
+  doorbell's camera on a wall tablet - and back where they were after a minute without a touch,
+  so no camera is left streaming to an empty room. A dashboard shows the banner or opens the
+  link, never both. *Open from: Home page* opens it only from the Home page. With no link, those
+  dashboards show the banner.
+- **Banner subtitle**: what the alert says, on one line under its name, as an iOS notification.
+
+### Changed
+
+- The banner's name is 2px smaller (tablet 22px, phone 16px), to make room for the subtitle.
+- The alert sheet: its status ("Firing · for 2 h") sits under the name in place of category and
+  priority (still in Rule Details), and what the alert says is on white, in a larger font.
+- The editor writes an event alert's Actions as `mode: parallel`: every fire starts the scripts,
+  and each script's own mode decides what a fire during its run does (`single` ignores it - a
+  doorbell pressed while it rings). Queued made fires pile up behind a running script.
+- The editor's (i) help is shorter: a short paragraph per option, saying what it does.
+
 ## [1.22+hm.1] - 2026-11-02
 
 The fork's first release, on Alert2 1.22, with alert-console-card 1.0.0.

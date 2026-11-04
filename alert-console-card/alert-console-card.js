@@ -37,7 +37,7 @@
  *   grid_options: {columns: full}   # required inside a sections-view grid
  */
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 /* The Health card's palette, renamed for what it means here. Same hex values, so a red
    alert and a red "offline" are the same red on the same dashboard. */
@@ -473,6 +473,8 @@ class AlertConsoleCard extends HTMLElement {
         linkMobile: a.link_mobile || null,
         // the dashboards that show its banner while it fires (url_paths)
         overlay: Array.isArray(a.overlay) ? a.overlay : [],
+        // the dashboards that open its link instead of the banner
+        overlayOpen: Array.isArray(a.overlay_open) ? a.overlay_open : [],
         hasDisplayMsg: !!a.has_display_msg,
         // an event alert: when its time as Firing runs out (no state change marks that moment)
         firingUntil: !isCond && lastFired ? lastFired + stay : null,
@@ -2448,82 +2450,32 @@ const TRIGGER_ROWS = [
 ];
 const TRIG_KINDS = TRIGGER_ROWS.map((k) => k.id);
 
-/* The (i) beside "Fires" - the user's own words, one panel per kind: side by side on a
-   tablet, one above the other on a phone. */
-const FIRES_INFO = `<div class="ipcols">
-  <section class="ipsec">
-    <div class="iph">While true</div>
-    <div class="iptag">A situation</div>
-    <div class="ipd">The alert mirrors something that is the case right now, so it turns OK by itself when
-      that stops. It answers "is something wrong right now?"</div>
-    <div class="ipneed">You need it when</div>
-    <ul class="iplist">
-      <li>It must last a while first: "garage door open for 10 minutes", which you can only say with For.</li>
-      <li>It should clean up after itself: "devices offline" goes away when they come back.</li>
-    </ul>
-  </section>
-  <section class="ipsec">
-    <div class="iph">When it happens</div>
-    <div class="iptag">A moment</div>
-    <div class="ipd">It fires the instant something happens, every time, and doesn't care whether the thing
-      is still going on. It stays until you clear it, or until "Stays firing" runs out.</div>
-    <div class="ipneed">You need it when</div>
-    <ul class="iplist">
-      <li>There's no lasting state to watch: a doorbell ring or a button press has no "is" to stay true,
-        or it sorted itself out before you looked.</li>
-      <li>You want every occurrence on its own: "this device went offline", each time, with its name.</li>
-    </ul>
-  </section>
-</div>`;
-/* The (i) beside a numeric condition's Margin - one panel, as the Fires panels. */
-const MARGIN_INFO = `<div class="ipcols one">
-  <section class="ipsec">
-    <div class="iph">Margin</div>
-    <div class="iptag">When it turns OK again</div>
-    <div class="ipd">Without a margin, a value that wobbles around its limit makes the alert fire, turn OK and
-      fire again, over and over. With one, the alert still fires at the limit, but turns OK only once the
-      value is back by the margin: "above -10" with a margin of 2 turns OK at -12.</div>
-    <div class="ipneed">You need it when</div>
-    <ul class="iplist">
-      <li>The value wobbles near the limit: a freezer, humidity, CO2, or a battery that bounces between 19
-        and 21 %.</li>
-      <li>OK should mean properly back to normal, not a hair under the limit.</li>
-    </ul>
-  </section>
-</div>`;
-/* The (i) beside Actions. */
-const ACTIONS_INFO = `<div class="ipcols one">
-  <section class="ipsec">
-    <div class="iph">Actions</div>
-    <div class="iptag">What it does when it fires</div>
-    <div class="ipd">Each time the alert fires, it runs the scripts you pick here, all at once. A script is told
-      which alert fired ({{ alert }}) and what it says ({{ message }}), so it can announce it. Snoozing the
-      alert does not stop them.</div>
-    <div class="ipneed">You need it when</div>
-    <ul class="iplist">
-      <li>Something should happen without you: close the water valve on a leak, or turn the porch light on
-        when the garage door is left open.</li>
-      <li>You want to see or hear it: flash a lamp red, or say "garbage tomorrow" on the speakers.</li>
-    </ul>
-  </section>
-</div>`;
-const NOTIFY_INFO = `<div class="ipcols one">
-  <section class="ipsec">
-    <div class="iph">Notify</div>
-    <div class="iptag">Who hears about it when it fires</div>
-    <div class="ipd">A push goes to each user you pick: every phone or tablet signed in to the Home Assistant app as
-      them, a new one too (Everyone: every device with the app). Tapping it opens the alert, and its buttons clear or
-      snooze it without opening anything. A banner drops in across the top of each dashboard you pick - on every
-      page, or (Show on: Home page, at the top of that list) on its Home page alone. Both go away by themselves once the
-      alert is OK again, cleared or snoozed.</div>
-    <div class="ipneed">You need it when</div>
-    <ul class="iplist">
-      <li>Someone should know even when nobody is looking at a screen: a water leak, or the garage door left
-        open at night.</li>
-      <li>Whoever walks past the wall tablet should see it: the garbage goes out tomorrow.</li>
-    </ul>
-  </section>
-</div>`;
+/* The editor's (i) popups: the section's name, then each option in a short paragraph of its
+   own - what it does, nothing more (the user's rule: short, to the point). */
+const infoHtml = (title, opts) => `<div class="ipcols one"><section class="ipsec"><div class="iph">${title}</div>${
+  opts.map(([name, text]) => `<div class="ipd">${name ? `<b>${name}</b><br>` : ""}${text}</div>`).join("")}</section></div>`;
+// beside "Fires"
+const FIRES_INFO = infoHtml("Fires", [
+  ["While true", "Fires while something is the case. Turns OK by itself when it stops."],
+  ["When it happens", "Fires each time something happens, like a doorbell ring. Stays firing until cleared or until Stays firing runs out."],
+]);
+// beside a numeric condition's Margin
+const MARGIN_INFO = infoHtml("Margin", [
+  ["", "Fires at the limit, but turns OK only once the value is back past it by the margin."],
+  ["", "Above -10 with a margin of 2 turns OK at -12."],
+]);
+// beside Actions
+const ACTIONS_INFO = infoHtml("Actions", [
+  ["", "Runs the scripts you pick each time the alert fires, all at once."],
+  ["", "Each script gets the alert's name ({{ alert }}) and message ({{ message }}). Snoozing doesn't stop them."],
+]);
+// beside Notify
+const NOTIFY_INFO = infoHtml("Notify", [
+  ["Push to", "A push to every device signed in to the app as that user. Its buttons clear or snooze the alert."],
+  ["Banner on", "A banner across the top of the dashboard. Show on: Home page keeps it to the Home page."],
+  ["Open link on", "Goes straight to the alert's link instead of a banner, and back after a minute without a touch."],
+  ["", "All of them end when the alert is OK, cleared or snoozed."],
+]);
 /* What the Health monitor announces on the bus, by part of Health: what it is called here,
    the event, and what the message says. */
 const HEV = {
@@ -2732,12 +2684,15 @@ function newRuleKey(hass) {
 /* The scripts a rule runs when it fires -> Alert2's actions_on (JSON text, as the rule API
    takes structured fields). Each script is told the alert's name and what it said; several
    run side by side, so one failing does not hold up the rest (and the failure still reaches
-   the timeline). An event alert queues them: every fire runs them, in turn. */
+   the timeline). An event alert starts them on every fire, side by side with a run still
+   going: what a fire during a run does is the SCRIPT's own mode - single ignores it (a
+   doorbell pressed while it rings), restart starts over, queued plays it after. Queued here
+   would override that: the script call waits for its run, so fires would pile up behind it. */
 function actionsOn(f, title, event) {
   const scripts = (f.actions || []).filter((x) => /^script\.[a-z0-9_]+$/.test(x));
   if (!scripts.length) return null;
   const call = (eid) => ({ action: eid, data: { alert: jtext(title || "Alert"), message: "{{ alert_message }}" } });
-  return JSON.stringify({ mode: event ? "queued" : "single",
+  return JSON.stringify({ mode: event ? "parallel" : "single",
                           actions: scripts.length === 1 ? [call(scripts[0])] : [{ parallel: scripts.map(call) }] });
 }
 
@@ -3039,17 +2994,24 @@ function notifyCfg(f, title) {
     cfg.title = jtext(title || "Alert");
     cfg.annotate_messages = "false";
   }
-  if (f.banner?.length) cfg.overlay = JSON.stringify(f.bannerMain ? f.banner.map((d) => `${d}/${BANNER_MAIN}`) : f.banner);
+  const where = (list, main) => JSON.stringify(main ? list.map((d) => `${d}/${BANNER_MAIN}`) : list);
+  if (f.banner?.length) cfg.overlay = where(f.banner, f.bannerMain);
+  if (f.open?.length) cfg.overlay_open = where(f.open, f.openMain);
   return cfg;
 }
 /* Where a banner shows: a whole dashboard ("tablet-dashboard": every page, a pop-up open over
    one too) or its main page alone ("tablet-dashboard/home": that page, not a pop-up open over
    it) - the rule's "Home page only". A dashboard's home page is its Home view, /<dashboard>/home. */
 const BANNER_MAIN = "home";
-function bannerForm(v) {
-  const list = listOf(v);
-  return { banner: [...new Set(list.map((x) => x.split("/")[0]))],
-           bannerMain: list.length > 0 && list.every((x) => x.endsWith(`/${BANNER_MAIN}`)) };
+// the banner's dashboards (`overlay`) and the ones that open the link instead (`overlay_open`),
+// each with its Home page only
+function bannerForm(v, o) {
+  const pages = (x) => {
+    const list = listOf(x);
+    return [[...new Set(list.map((y) => y.split("/")[0]))], list.length > 0 && list.every((y) => y.endsWith(`/${BANNER_MAIN}`))];
+  };
+  const [banner, bannerMain] = pages(v), [open, openMain] = pages(o);
+  return { banner, bannerMain, open, openMain };
 }
 // whether this page shows a banner an alert has on those dashboards or pages (its `overlay`)
 function bannerHere(overlay) {
@@ -3115,7 +3077,7 @@ function formFromCfg(cfg) {
       linkMobile: collapseOnly(cfg.link_mobile),
       actions: ok && Array.isArray(rule.actions) ? rule.actions.slice() : [],
       notify: listOf(cfg.notifier),
-      ...bannerForm(cfg.overlay),
+      ...bannerForm(cfg.overlay, cfg.overlay_open),
     };
   }
   return {
@@ -3134,7 +3096,7 @@ function formFromCfg(cfg) {
     linkMobile: collapseOnly(cfg.link_mobile),
     actions: ok && Array.isArray(rule.actions) ? rule.actions.slice() : [],
     notify: listOf(cfg.notifier),
-    ...bannerForm(cfg.overlay),
+    ...bannerForm(cfg.overlay, cfg.overlay_open),
   };
 }
 /* Alert2's own alerts - made by Alert2, not by a rule. Their settings live in the rule store
@@ -3158,7 +3120,7 @@ function formFromBuiltin(cfg) {
     stayMins: cfg.stays_firing_mins != null ? Number(cfg.stays_firing_mins) : 1440,
     message: "", description: String(cfg.description || ""),
     linkDesktop: collapseOnly(cfg.link), linkMobile: collapseOnly(cfg.link_mobile),
-    actions: [], notify: listOf(cfg.notifier), ...bannerForm(cfg.overlay),
+    actions: [], notify: listOf(cfg.notifier), ...bannerForm(cfg.overlay, cfg.overlay_open),
   };
 }
 function compileBuiltin(f, hass, key) {
@@ -3185,7 +3147,7 @@ function compileBuiltin(f, hass, key) {
 // so an emptied one, or one of the other kind (a trigger on an alert turned to "While
 // true"), is removed
 const OPTIONAL_CFG = ["description", "link", "link_mobile", "delay_on_secs", "condition", "trigger", "display_msg", "stays_firing_mins", "threshold", "actions_on",
-  "notifier", "overlay", "title", "annotate_messages"];
+  "notifier", "overlay", "overlay_open", "title", "annotate_messages"];
 const ICON_CHEV_R = `<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>`;
 const ICON = {
   x: `<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>`,
@@ -3232,12 +3194,14 @@ class RuleEditor {
     this.key = init ? { domain: init.cfg.domain, name: init.cfg.name } : newRuleKey(this.hass);
     this.f = init?.form || { type: "state", title: "", priority: "high", category: "", clearable: false, conds: [], match: "all",
                              forMins: 0, stayMins: 1440, message: "", description: "", linkDesktop: "", linkMobile: "", actions: [],
-                             notify: [], banner: [], bannerMain: false };
+                             notify: [], banner: [], bannerMain: false, open: [], openMain: false };
     this.f.type ||= "state";
     this.f.actions ||= [];
     this.f.notify ||= [];
     this.f.banner ||= [];
     this.f.bannerMain = !!this.f.bannerMain;
+    this.f.open ||= [];
+    this.f.openMain = !!this.f.openMain;
     if (this.f.stayMins == null) this.f.stayMins = 1440;
     this.ui = { picker: null, adding: !this.f.conds.length, addingT: false, folds: {}, busy: false, catTouched: !!init,
                 clearTouched: !!init, enter: new Set(init ? [] : ["add"]) };
@@ -3525,27 +3489,30 @@ class RuleEditor {
   }
 
   /* Notify, laid out as Links: "Push to" users - every device signed in to the Home Assistant
-     app as them, now and later (the fork's `user:<id>`; Everyone is `user:*`) - and "Banner on"
-     the dashboards: Alert2's `notifier` and the fork's `overlay`. Each row's chip says what is
-     chosen; the row opens its list under it, where any number are picked (white) before it
-     closes. */
+     app as them, now and later (the fork's `user:<id>`; Everyone is `user:*`) - "Banner on" the
+     dashboards, and "Open link on" the dashboards that go straight to the alert's link instead
+     (a wall tablet showing the doorbell's camera): Alert2's `notifier`, the fork's `overlay` and
+     `overlay_open`. A dashboard does one or the other - picked in one list, it leaves the other.
+     Each row's chip says what is chosen; the row opens its list under it, where any number are
+     picked (white) before it closes. */
   paintNotify() {
     const box = this.sheet.querySelector("#edNotify");
     if (!box) return;
     const row = (key, label) => {
       const open = this.ui.picker === key;
-      const any = (key === "np" ? this.f.notify : this.f.banner).length > 0;
+      const any = this.nlist(key).length > 0;
       return `<button class="ed-row ed-pickrow" data-pick="${key}" aria-expanded="${open}"><span class="ed-lbl">${label}</span>
           <span class="ed-vals"><span class="ed-chip ed-linkchip${any ? " sel" : " empty"}${open ? " on" : ""}" data-nchip="${key}">
             <span class="ed-cin">${escapeHtml(this.notifyChipText(key))}</span></span></span></button>
         ${open ? `<div class="ed-picker${this.takeEnter(key) ? " enter" : ""}" data-picker="${key}">
-            ${key === "nb" ? this.bannerPagesHtml() : ""}
+            ${key === "np" ? "" : this.bannerPagesHtml(key)}
             <div class="ed-list ed-nlist">${this.notifyListHtml(key)}</div></div>` : ""}`;
     };
     box.innerHTML = `<div class="ed-head">Notify<button class="info ed-info" data-notifyinfo title="What does Notify do?"
           aria-label="What does Notify do?"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6v.01"/></svg></button></div>
       ${row("np", "Push to")}
-      ${row("nb", "Banner on")}`;
+      ${row("nb", "Banner on")}
+      ${row("no", "Open link on")}`;
     this.placeThumbs(box);
     // the users and their devices, read from the fork each time the sheet opens - a phone
     // signed in a minute ago is there; the chip and an open list follow once it is read
@@ -3560,21 +3527,28 @@ class RuleEditor {
     }
   }
 
-  /* Banner on's list leads with where on the dashboards it shows: Every page, or each one's Home
-     page alone (/home). A switch, not a row of the list - as a row it read as one more dashboard. */
-  bannerPagesHtml() {
-    return `<div class="ed-row ed-bpages"><span class="ed-lbl">Show on</span><span class="ed-vals">${
-      this.segHtml("bp", "", [["every", "Every page"], ["home", "Home page"]], this.f.bannerMain ? "home" : "every", "Which pages")
-    }</span></div>`;
+  // the list each Notify row picks into, and the attribute its list's rows carry
+  nlist(key) { return key === "np" ? this.f.notify : key === "nb" ? this.f.banner : this.f.open; }
+  nattr(key) { return key === "np" ? "push" : key === "nb" ? "banner" : "bopen"; }
+
+  /* A dashboard list leads with where on the dashboards it happens: Every page, or each one's
+     Home page alone (/home) - the banner shows there, or the link opens from there. A switch,
+     not a row of the list - as a row it read as one more dashboard. Open link with no link to
+     open says so: those dashboards show the banner until there is one. */
+  bannerPagesHtml(key) {
+    const nolink = key === "no" && !this.f.linkDesktop && !this.f.linkMobile;
+    return `<div class="ed-bset"><div class="ed-row"><span class="ed-lbl">${key === "nb" ? "Show on" : "Open from"}</span><span class="ed-vals">${
+      this.segHtml("bp", key, [["every", "Every page"], ["home", "Home page"]], (key === "nb" ? this.f.bannerMain : this.f.openMain) ? "home" : "every", "Which pages")
+    }</span></div>${nolink ? `<div class="ed-none">No link yet - add one under Links. Until then, these show the banner.</div>` : ""}</div>`;
   }
 
-  /* What a list offers: Everyone and the users with a device (np), or the dashboards (nb). One
-     the rule names but the list no longer has stays in it, so it can be let go - a user with
-     no device now, or a single device named by hand. null while the users are being read. */
+  /* What a list offers: Everyone and the users with a device (np), or the dashboards (nb, no).
+     One the rule names but the list no longer has stays in it, so it can be let go - a user
+     with no device now, or a single device named by hand. null while the users are being read. */
   notifyTargets(key) {
-    if (key === "nb") {
+    if (key !== "np") {
       const all = bannerDashboards(this.hass).map((d) => ({ ...d, sub: `/${d.id}`, mono: true }));
-      for (const id of this.f.banner) {
+      for (const id of this.nlist(key)) {
         if (!all.some((x) => x.id === id)) all.push({ id, name: id, icon: "mdi:view-dashboard", sub: "No longer found" });
       }
       return all;
@@ -3601,25 +3575,26 @@ class RuleEditor {
   }
 
   // one: its name; more: the first and how many besides ("…" while the users are being read);
-  // a banner on Home pages only says so, as its list - closed - would not
+  // Home pages only says so, as its list - closed - would not
   notifyChipText(key) {
-    const ids = key === "np" ? this.f.notify : this.f.banner;
+    const ids = this.nlist(key);
     if (!ids.length) return key === "np" ? "Choose users" : "Choose dashboards";
     const chosen = this.notifyTargets(key)?.filter((x) => ids.includes(x.id));
     if (!chosen) return "…";
     const names = chosen.length === 1 ? chosen[0].name : `${chosen[0].name} + ${chosen.length - 1} more`;
-    return key === "nb" && this.f.bannerMain ? `${names} · Home page` : names;
+    if (key === "np") return names;
+    return `${names}${(key === "nb" ? this.f.bannerMain : this.f.openMain) ? " · Home page" : ""}`;
   }
 
   notifyListHtml(key) {
     const push = key === "np";
-    const ids = push ? this.f.notify : this.f.banner;
+    const ids = this.nlist(key);
     if (push && this.pushUsers?.failed) return `<div class="ed-none">The users could not be read. Close the rule and open it again.</div>`;
     const all = this.notifyTargets(key);
     if (!all) return `<div class="ed-none">Reading the users…</div>`;
     if (!all.length) return `<div class="ed-none">No dashboards found.</div>`;
     // Everyone apart from the users, as the link list sets its suggestions apart
-    return all.map((x) => `<button class="ed-item ed-lnk${ids.includes(x.id) ? " sel" : ""}" data-${push ? "push" : "banner"}="${escapeHtml(x.id)}"
+    return all.map((x) => `<button class="ed-item ed-lnk${ids.includes(x.id) ? " sel" : ""}" data-${this.nattr(key)}="${escapeHtml(x.id)}"
         role="checkbox" aria-checked="${ids.includes(x.id)}">
         <span class="ed-lic"><ha-icon icon="${escapeHtml(x.icon)}"></ha-icon></span>
         <span class="ed-itext"><span class="ed-iname">${escapeHtml(x.name)}</span>
@@ -3629,8 +3604,8 @@ class RuleEditor {
 
   // after a pick, in place - the list stays open: its rows' ticks and the row's chip
   syncNotify(key) {
-    const ids = key === "np" ? this.f.notify : this.f.banner;
-    const attr = key === "np" ? "push" : "banner";
+    const ids = this.nlist(key);
+    const attr = this.nattr(key);
     for (const r of this.sheet.querySelectorAll(`[data-${attr}]`)) {
       const on = ids.includes(r.dataset[attr]);
       r.classList.toggle("sel", on);
@@ -4374,18 +4349,20 @@ class RuleEditor {
     }
     if ((b = hit("[data-bp]"))) {
       // in place, as a dashboard is picked: the list stays open, the thumb slides, the chip follows
-      const main = b.dataset.bp.split(":")[1] === "home";
-      if (main === this.f.bannerMain) return;
+      const [key, page] = b.dataset.bp.split(":");
+      const field = key === "nb" ? "bannerMain" : "openMain";
+      const main = page === "home";
+      if (main === this.f[field]) return;
       const seg = b.closest(".ed-sw");
       const from = this.thumbsOf(seg.parentElement);
-      this.f.bannerMain = main;
+      this.f[field] = main;
       for (const x of seg.querySelectorAll(".ed-seg-btn")) {
         const on = x === b;
         x.classList.toggle("on", on);
         x.setAttribute("aria-checked", String(on));
       }
       this.placeThumbs(seg.parentElement, from);
-      this.syncNotify("nb");
+      this.syncNotify(key);
       return;
     }
     if ((b = hit("[data-tk]"))) {
@@ -4401,11 +4378,11 @@ class RuleEditor {
     if ((b = hit("[data-margininfo]"))) return this.card._popAt(b, MARGIN_INFO, "x");
     if ((b = hit("[data-actinfo]"))) return this.card._popAt(b, ACTIONS_INFO, "x");
     if ((b = hit("[data-notifyinfo]"))) return this.card._popAt(b, NOTIFY_INFO, "x");
-    if ((b = hit("[data-push]")) || (b = hit("[data-banner]"))) {
+    if ((b = hit("[data-push]")) || (b = hit("[data-banner]")) || (b = hit("[data-bopen]"))) {
       // picked or let go in place: the list stays open for the next one, the chip follows
-      const key = b.dataset.push != null ? "np" : "nb";
-      const list = key === "np" ? this.f.notify : this.f.banner;
-      const id = b.dataset.push ?? b.dataset.banner;
+      const key = b.dataset.push != null ? "np" : b.dataset.banner != null ? "nb" : "no";
+      const list = this.nlist(key);
+      const id = b.dataset[this.nattr(key)];
       const at = list.indexOf(id);
       if (at >= 0) list.splice(at, 1);
       else {
@@ -4413,6 +4390,11 @@ class RuleEditor {
         if (id === EVERYONE) list.length = 0;
         else if (key === "np" && list.includes(EVERYONE)) list.splice(list.indexOf(EVERYONE), 1);
         list.push(id);
+        // a dashboard shows the banner or opens the link, never both: it leaves the other list,
+        // whose chip (the row above or below) says so
+        const other = key === "nb" ? "no" : key === "no" ? "nb" : null;
+        const was = other ? this.nlist(other).indexOf(id) : -1;
+        if (was >= 0) { this.nlist(other).splice(was, 1); this.syncNotify(other); }
       }
       this.syncNotify(key);
       return;
@@ -6324,7 +6306,7 @@ dialog.idlg::backdrop, dialog.snz::backdrop{background:transparent}
 .iplist + .ipk{margin-top:14px}
 .ipd + .ipd{margin-top:8px}
 .iplist + .ipd{margin-top:16px}
-/* an explanation of two options: a panel each, side by side where there is room */
+/* an editor (i): the section's name, then a short paragraph per option (infoHtml) */
 .ipop.xwide:has(.ipcols){padding:12px}
 .ipcols{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .ipcols.one{grid-template-columns:1fr}
@@ -6333,10 +6315,7 @@ dialog.idlg::backdrop, dialog.snz::backdrop{background:transparent}
 .ipsec{padding:12px 14px 10px;border-radius:10px;background:rgba(255,255,255,.05);
        box-shadow:inset 0 0 0 1px rgba(255,255,255,.07)}
 .iph{font-size:17px;font-weight:700;color:var(--txt)}
-.iptag{margin-top:1px;font-size:var(--fs-meta);font-weight:600;color:var(--txt2)}
-.ipsec .ipd{margin-top:9px}
-.ipneed{margin-top:12px;font-size:var(--fs-label);font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--txt2)}
-.ipneed + .iplist{margin-top:5px}
+.ipsec .ipd{margin-top:10px}
 /* the (i) beside a label in the editor */
 .ed-lbl .ed-info{display:inline-grid;margin:-6px 0 -6px 4px;vertical-align:middle}
 .ipev{display:flex;align-items:center;gap:9px;font-size:var(--fs-body);color:var(--txt)}
@@ -6643,7 +6622,7 @@ dialog.red.narrow .ed-evrow .ed-evtitle{flex-basis:100%}
 .ed-picker.enter{animation:edOpen 260ms var(--ed-ease) backwards}
 .ed-picker.enter > *{animation:edDrop 420ms var(--ed-spring) backwards}
 /* Banner on's Show on: a setting of the list, ruled off from the dashboards under it */
-.ed-bpages{border-bottom:1px solid rgba(255,255,255,.12)}
+.ed-bset{border-bottom:1px solid rgba(255,255,255,.12)}
 @keyframes edOpen{from{max-height:0;opacity:0}to{max-height:460px;opacity:1}}
 @keyframes edDrop{from{transform:translateY(-14px) scale(.94);opacity:0}to{transform:none;opacity:1}}
 .ed-opts{display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px;max-height:240px;overflow-y:auto}
@@ -7596,9 +7575,11 @@ class AlertPhoneView extends HTMLElement {
       (editable ? `<button class="big" data-edit="${id}">Edit</button>` : "") +
       (link ? `<button class="big" data-act="open" data-eid="${id}">Link</button>` : ""),
     ].filter(Boolean);
-    return `${this._head(phTile(r, "lg"), r.name, `<div class="sht2">${escapeHtml(phCap(r.category))} · ${escapeHtml(PRIO[r.priority].label)} priority</div>`)}
-      <div class="sstat" style="--c:${st.tone}"><span class="sdot"></span>${escapeHtml(st.text)}${r.since && r.firing ? ` · for ${escapeHtml(phFor(Date.now() - r.since))}` : r.okSince && !r.snoozeUntil ? ` · since ${escapeHtml(phRelLong(r.okSince))}` : ""}</div>
-      ${msg ? `<div class="smsg">${escapeHtml(msg)}</div>` : ""}
+    // under the name: its status (category and priority are in Rule Details); then what it says,
+    // the one thing to read here - on the selection white
+    const stat = `${st.text}${r.since && r.firing ? ` · for ${phFor(Date.now() - r.since)}` : r.okSince && !r.snoozeUntil ? ` · since ${phRelLong(r.okSince)}` : ""}`;
+    return `${this._head(phTile(r, "lg"), r.name, `<div class="sht2 evk" style="--c:${st.tone}"><span class="sdot"></span>${escapeHtml(stat)}</div>`)}
+      ${msg ? `<div class="smsg hl">${escapeHtml(msg)}</div>` : ""}
       ${acts.map((a) => `<div class="sacts">${a}</div>`).join("")}
       <div class="group navs">
         ${this._navRow(`data-spush="timeline" data-eid="${id}"`, "mdi:timeline-clock-outline", "Timeline", n ? `${n} event${n === 1 ? "" : "s"}` : "")}
@@ -8086,10 +8067,9 @@ svg{fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-l
 .sback svg{width:22px;height:22px;stroke-width:2.6}
 .sbar2{display:flex;align-items:center;justify-content:space-between;margin-top:-4px;touch-action:none}
 .sbar2 + .shead{padding-top:16px}
-.sstat{display:inline-flex;align-items:center;gap:7px;margin:16px 0 0;padding:6px 12px;border-radius:14px;font-size:15px;font-weight:600;
-  color:var(--c);background:color-mix(in srgb,var(--c) 16%,transparent)}
 .sdot{width:8px;height:8px;border-radius:50%;background:var(--c);flex:0 0 auto}
 .smsg{font-size:17px;line-height:23px;margin:14px 2px 0;white-space:pre-line;overflow-wrap:anywhere}
+.smsg.hl{background:#fff;color:var(--bg);font-size:18px;line-height:24px;font-weight:500;margin:16px 0 0;padding:9px 14px;border-radius:14px}
 .sacts{display:flex;gap:10px;margin:18px 0 6px}
 .sacts + .sacts{margin-top:4px}
 .big{flex:1;min-height:50px;border-radius:25px;background:rgba(255,255,255,.12);font-size:17px;font-weight:600;text-align:center;
@@ -8206,12 +8186,17 @@ customElements.define("alert-phone-view", AlertPhoneView);
    A banner drops in from the top, as on iOS; a tap opens the alert's popup right where it is -
    in a hidden copy of this card (banner_host), made on the first tap; a swipe up puts it away on
    this device until the alert fires again. At most three show, the newest on top.
-   It is white, as an entity that is on, and says only the alert's name (what it says is in its
-   popup), with an Open button for the alert's link; a tablet or a computer (wider than a phone)
-   gets a bigger one, readable from across the room. */
+   It is white, as an entity that is on, with the alert's name and what it says under it, and an
+   Open button for the alert's link; a tablet or a computer (wider than a phone) gets a bigger
+   one, readable from across the room.
+   Open link on (the fork's `overlay_open`, dashboards as `overlay`): those dashboards go straight
+   to the alert's link the moment it fires, instead of the banner - the doorbell's camera on the
+   wall tablet - and back where they were after a minute without a touch, so a camera is not left
+   streaming to an empty room. With no link to open, they show the banner. */
 const BANNER_AWAY_KEY = "hm-alert-banner-away";   // per device: { entity id: when it fired }
 const BANNER_MAX = 3;
 const BANNER_NARROW = "(max-width: 700px)";   // the card's own phone/tablet split
+const OPEN_IDLE_MS = 60e3;   // an opened link goes back after this long without a touch
 
 class AlertBannerStack extends HTMLElement {
   constructor() {
@@ -8235,6 +8220,14 @@ class AlertBannerStack extends HTMLElement {
     // a pop-up opens and closes as the address's #hash (Bubble Card)
     window.addEventListener("hashchange", soon);
     this._bindGestures();
+    // Open link: the firing each alert was last seen at (null until the first look - what fires
+    // before this page loaded is not opened), the link opened and where it came from, and the
+    // last touch anywhere on the page, which keeps it open a minute more
+    this._seen = null;
+    this._opened = null;
+    this._touchAt = 0;
+    const touch = () => { this._touchAt = Date.now(); };
+    for (const t of ["pointerdown", "keydown", "wheel"]) window.addEventListener(t, touch, { capture: true, passive: true });
   }
 
   _dropHost() {
@@ -8249,6 +8242,7 @@ class AlertBannerStack extends HTMLElement {
   _tick() {
     const hass = this._hass();
     if (!hass?.states) return;
+    this._closeIdle();
     // the popup's copy follows Home Assistant while it is open
     const view = this._host?._phView;
     if (view && hass !== this._hostHass && (view._sheetOpen || !view._el?.menu.hidden)) { this._hostHass = hass; this._host.hass = hass; }
@@ -8261,10 +8255,50 @@ class AlertBannerStack extends HTMLElement {
     this._sig = sig;
     const onAlerts = /^\/[^/]+\/alerts\/?$/.test(location.pathname);
     const { rows } = AlertConsoleCard.prototype._read.call(null, hass);
-    const want = onAlerts ? [] : rows
-      .filter((r) => bannerHere(r.overlay) && r.firing && !r.snoozeUntil && !r.notificationsOff && this._away[r.id] !== this._firing(r))
+    const live = rows.filter((r) => (bannerHere(r.overlay) || bannerHere(r.overlayOpen)) && r.firing && !r.snoozeUntil && !r.notificationsOff);
+    // where it opens its link it shows no banner - it opens, once a firing; no link, its banner
+    const opens = live.filter((r) => bannerHere(r.overlayOpen) && this._link(r, hass));
+    this._openNew(rows, opens, hass);
+    const want = onAlerts ? [] : live
+      .filter((r) => !opens.includes(r) && this._away[r.id] !== this._firing(r))
       .sort((a, b) => (b.since || 0) - (a.since || 0)).slice(0, BANNER_MAX);
     this._paint(want, hass);
+  }
+
+  /* Open link: the newest alert that has fired since the last look, and opens its link here, is
+     opened - one firing once. A firing seen for the first time when this page loads, or while
+     this screen was not one to open it on, is only noted: a page coming back, or a step to the
+     Home page, must not be taken over by an alert that fired a while ago. */
+  _openNew(rows, opens, hass) {
+    const first = !this._seen;
+    const seen = this._seen || {};
+    const fresh = opens.filter((r) => !first && seen[r.id] !== this._firing(r))
+      .sort((a, b) => (b.since || 0) - (a.since || 0));
+    this._seen = {};
+    for (const r of rows) if (r.firing) this._seen[r.id] = this._firing(r);
+    if (!fresh.length) return;
+    const link = this._link(fresh[0], hass);
+    if (/^https?:\/\//i.test(link)) return;   // another site: a wall screen does not leave for it
+    const path = new URL(link, location.origin).pathname.replace(/\/$/, "");
+    // already there (a second ring with the camera still open): only the minute starts again
+    if (this._opened && location.pathname.replace(/\/$/, "") === path) { this._opened.at = Date.now(); return; }
+    this._opened = { path, back: `${location.pathname}${location.search}${location.hash}`, at: Date.now() };
+    AlertConsoleCard.prototype._navigate.call(this, link);
+  }
+
+  /* Back where it was, a minute after it opened or after the last touch, whichever is later - if
+     the screen is still on the link's page (its pop-up open, or closed by hand). Gone elsewhere,
+     someone is using it: it is left alone. */
+  _closeIdle() {
+    const o = this._opened;
+    if (!o) return;
+    if (location.pathname.replace(/\/$/, "") !== o.path) { this._opened = null; return; }
+    if (Date.now() - Math.max(o.at, this._touchAt) < OPEN_IDLE_MS) return;
+    this._opened = null;
+    history.pushState(null, "", o.back);
+    this.dispatchEvent(new CustomEvent("location-changed", { bubbles: true, composed: true }));
+    // the link's pop-up closes as its #hash goes (Bubble Card), and one open before comes back
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
   }
 
   /* The alert's link for this screen, as the card's own Link button picks it: the mobile one
@@ -8275,10 +8309,13 @@ class AlertBannerStack extends HTMLElement {
                                 _narrow: () => matchMedia(BANNER_NARROW).matches }, r);
   }
 
-  // the Open button is there when the alert has a link
+  // the name, what it says under it on one line (as an iOS notification; a message of several
+  // lines joined), the Open button when the alert has a link
   _html(r, hass) {
     const link = this._link(r, hass);
-    return `${phTile(r)}<span class="bt"><span class="b1">${escapeHtml(r.name)}</span></span>
+    const sub = (r.message || r.description).split("\n").map((l) => l.trim()).filter(Boolean).join(" · ");
+    return `${phTile(r)}<span class="bt"><span class="b1">${escapeHtml(r.name)}</span>${
+      sub ? `<span class="b2">${escapeHtml(sub)}</span>` : ""}</span>
       <span class="bw">${escapeHtml(r.since ? phRel(r.since) : "")}</span>${
       link ? `<button class="bgo" data-link="${escapeHtml(link)}">Open</button>` : ""}`;
   }
@@ -8424,8 +8461,8 @@ class AlertBannerStack extends HTMLElement {
 }
 
 const BANNER_STYLES = `
-/* White as an entity that is on (solid: no blur behind it to compute), the name alone in one
-   centred row, floating well above the page */
+/* White as an entity that is on (solid: no blur behind it to compute), the name and what the
+   alert says under it, floating well above the page */
 :host{position:fixed;top:0;left:0;right:0;z-index:8;pointer-events:none;
   font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
 *{box-sizing:border-box}
@@ -8437,7 +8474,9 @@ const BANNER_STYLES = `
 .tile{flex:0 0 auto;width:44px;height:44px;border-radius:12px;display:grid;place-items:center;background:var(--c);color:#fff}
 .tile ha-icon{--mdc-icon-size:26px}
 .bt{flex:1;min-width:0}
-.b1{display:block;font-size:18px;font-weight:700;line-height:26px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.b1{display:block;font-size:16px;font-weight:700;line-height:21px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* the message: in the time's font (the phone's Open size where there is no time) */
+.b2{display:block;font-size:15px;font-weight:500;line-height:20px;color:rgba(0,0,0,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* how long ago it fired: a wide screen only - a phone's row is the name's */
 .bw{display:none;line-height:26px;color:rgba(0,0,0,.5);white-space:nowrap}
 .bgo{flex:0 0 auto;height:44px;padding:0 20px;border:0;border-radius:22px;margin:0;background:var(--tone);color:var(--on);
@@ -8453,7 +8492,8 @@ const BANNER_STYLES = `
     box-shadow:0 2px 4px rgba(0,0,0,.3),0 10px 24px rgba(0,0,0,.4),0 28px 70px rgba(0,0,0,.65)}
   .tile{width:52px;height:52px;border-radius:14px}
   .tile ha-icon{--mdc-icon-size:30px}
-  .b1{font-size:24px;line-height:30px}
+  .b1{font-size:22px;line-height:28px}
+  .b2{font-size:18px;line-height:24px}
   .bw{display:block;font-size:18px;font-weight:500;line-height:30px}
   .bgo{height:52px;padding:0 26px;border-radius:26px;font-size:18px}
 }

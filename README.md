@@ -30,8 +30,8 @@ Alert2 is a [Home Assistant](https://www.home-assistant.io/) component that supp
 > add-only: upstream behaviour is unchanged unless you use it. In short:
 >
 > - **alert-console-card** ([its README](alert-console-card/README.md)) - an Alerts view for tablets
->   and phones (what is firing, a chart, every alert's timeline), a rule editor, and banners that
->   drop in across the top of chosen dashboards.
+>   and phones (what is firing, a chart, every alert's timeline), a rule editor, banners that
+>   drop in across the top of chosen dashboards, and dashboards that open the alert's link instead.
 > - **Push to users** (`user:<id>`, `user:*`) - every phone signed in to the app as them, with
 >   Clear / Snooze buttons, taken back when the alert is OK (`hm_push.py`, `alerts_page`).
 > - **Rules as files** (`rules_dir`) - every UI rule is a YAML file too (`hm_rules.py`).
@@ -39,7 +39,7 @@ Alert2 is a [Home Assistant](https://www.home-assistant.io/) component that supp
 > - **Calendar reminders** - an API other cards use to put alerts on calendar events
 >   (`alert2/hm/reminders/*`, `hm_reminders.py`).
 > - Rule fields: `category`, `description`, `link` / `link_mobile`, `overlay` (banners),
->   `allow_clear`, `stays_firing_mins`, `actions_on` on event alerts; top level
+>   `overlay_open` (open the link), `allow_clear`, `stays_firing_mins`, `actions_on` on event alerts; top level
 >   `start_delay_secs`, `merge_warnings_into_errors`.
 
 ## Table of Contents
@@ -602,12 +602,14 @@ You may want to set `ack_required` to continue to get reminders that the alert f
 Lastly, you can test your automation action in the UI.  The lovelace "more-info" dailog (that pops up when you click on the alert2 entity in the UI) has a line at the bottom showing whether the `actions_on` automation action is running and buttons to cancel the run as well as to manually start a run.
 
 **Fork (hm):** event alerts take `actions_on` too, and run it each time they fire (give it
-`mode: queued` so fires close together each run it). Besides `notify_reason`, `alert_domain` and
+`mode: parallel` so fires close together each start it - then a script's own `mode` decides what
+a fire during its run does: `single` ignores it, `restart` starts over, `queued` plays it after;
+the Alerts card's editor writes `parallel`). Besides `notify_reason`, `alert_domain` and
 `alert_name`, the actions get `alert_entity_id` and `alert_message` - what the alert said when it
 fired - so a script can announce it:
 
     actions_on:
-      mode: queued
+      mode: parallel
       actions:
         - action: script.announce
           data:
@@ -802,7 +804,11 @@ banner across the top of those dashboards while it fires - or a dashboard's Home
 (`tablet-dashboard/home`: that page, not a pop-up open on it). Alert2 only carries the list, as
 the alert's `overlay` attribute. The banner is alert-console-card's (see its README). A
 calendar reminder takes the same choice as `banner_home: true` on `alert2/hm/reminders/save`,
-and reads it back as `banner` (the dashboards) plus `banner_home`.
+and reads it back as `banner` (the dashboards) plus `banner_home`. `overlay_open`, a list as
+`overlay` (a dashboard in one or the other), makes those dashboards open the alert's link when
+it fires, instead of the banner (a wall tablet showing the doorbell's camera), and go back after
+a minute without a touch; with no link they show the banner. Alert2 passes it on as the
+`overlay_open` attribute.
 
 **Fork (hm): calendar reminders.** An alert on one calendar event, made for other cards (the
 Simple Schedule card's Alert section) through four websocket commands - anyone signed in may
