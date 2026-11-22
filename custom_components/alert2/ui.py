@@ -1062,7 +1062,21 @@ class UiMgr:
         # with (Home Assistant keeps it for an entity added back) - and judges at once
         oldEidHm = getattr(self.alerts[listIdx]['ent'], 'entity_id', None)
         if oldEidHm:
-            restore_state.async_get(self._hass).last_states.pop(oldEidHm, None)
+            # Home Assistant keeps a removed entity's state by registry id when it had a registry
+            # entry (an entity added back gets that id again, even after the entry was removed),
+            # else by entity id - both go. Older HA had one dict, `last_states`, by entity id.
+            # This runs AFTER the old alert was undeclared, so it must never raise: it used to (HA
+            # dropped `last_states`) and every save in the card then deleted the rule it was saving.
+            try:
+                rsd = restore_state.async_get(self._hass)
+                for byEid in (getattr(rsd, 'last_states', None), getattr(rsd, 'last_states_by_entity_id', None)):
+                    if byEid is not None:
+                        byEid.pop(oldEidHm, None)
+                byRid = getattr(rsd, 'last_states_by_entity_registry_id', None) or {}
+                for rid in [r for r, s in byRid.items() if s.state.entity_id == oldEidHm]:
+                    del byRid[rid]
+            except Exception as ex:  # an HA internal moved again: lose the nicety, not the rule
+                _LOGGER.warning(f'could not clear the old state of {oldEidHm}: {ex}')
         
         if isAlert2Internal(preppedConfig):
             newEnt = await self.declareInternalAlert(preppedConfig, doReport=False)

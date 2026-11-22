@@ -108,7 +108,8 @@ _KINDS = {
 }
 # event data copied into the entry when present
 # ("names": the notifiers as people read them - an app's by its device's name)
-_FIELDS = ("message", "notifiers", "names", "reason", "delay_secs", "enabled", "snooze_until", "ok", "error")
+_FIELDS = ("message", "notifiers", "names", "reason", "delay_secs", "enabled", "snooze_until", "ok", "error",
+           "actions")
 
 # an item of a message, by name: before " · ", without a closing "(...)" or a trailing value
 _TAIL_PAREN = re.compile(r"\s*\([^()]*\)\s*$")
@@ -196,7 +197,9 @@ class TimelineMgr:
         if not entity_id:
             return
         entry: dict[str, Any] = {
-            "t": event.time_fired.isoformat(),
+            # an action run is told of when it ends (whether it worked), but it is WHEN IT
+            # STARTED - the doorbell's chime at the press, not seconds later
+            "t": event.data.get("started") or event.time_fired.isoformat(),
             "kind": _KINDS[event.event_type],
         }
         for field in _FIELDS:

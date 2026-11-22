@@ -857,6 +857,28 @@ async def test_hm_event_alert_runs_its_actions_every_time(hass, service_calls):
     assert all(e['ok'] for e in gad.hmTimeline.timeline('alert2.test_e1')['alert2.test_e1'] if e['kind'] == 'action')
 
 
+async def test_hm_action_entry_names_what_ran(hass, service_calls):
+    assert await async_setup_component(hass, 'script', {'script': {'chime': {'alias': 'Doorbell Chime', 'sequence': []}}})
+    assert await async_setup_component(hass, 'counter', {'counter': {'runs': {'name': 'Runs'}}})
+    gad = await start(hass, [
+        {'domain': 'test', 'name': 'e4', 'notifier': None,
+         'trigger': [{'platform': 'state', 'entity_id': 'sensor.door', 'to': 'open'}],
+         'actions_on': {'actions': [
+             {'action': 'script.chime'},
+             {'action': 'counter.increment', 'target': {'entity_id': 'counter.runs'}},
+             {'delay': 0}]}},
+    ])
+    await setAndWait(hass, 'sensor.door', 'open')
+    await hass.async_block_till_done()
+    log = gad.hmTimeline.timeline('alert2.test_e4')['alert2.test_e4']
+    [fire] = [e for e in log if e['kind'] == 'fire']
+    [act] = [e for e in log if e['kind'] == 'action']
+    assert act['actions'] == ['Doorbell Chime', 'counter.increment · Runs']
+    # timed when it started, not when it was done
+    assert rawdt.datetime.fromisoformat(act['t']) >= rawdt.datetime.fromisoformat(fire['t'])
+    assert 'started' not in act
+
+
 async def test_hm_event_alert_action_failure_is_on_its_timeline(hass, service_calls):
     gad = await start(hass, [
         {'domain': 'test', 'name': 'e2', 'notifier': None,

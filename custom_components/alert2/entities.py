@@ -1227,6 +1227,29 @@ class AlertBase(AlertCommon, RestoreEntity):
     # which alert it is, and what it said when it fired (for a script that announces it)
     def _hm_action_vars(self):
         return { 'alert_entity_id': self.entity_id, 'alert_message': self.last_fired_message or '' }
+
+    # hm: what an alert's actions run, by name, for its timeline (user 2026-11-08: an entry
+    # said "Action ran" and nothing else). From the actions as configured, read at each run:
+    # a script by its name, any other action as itself, with the names of what it targets.
+    def _hm_action_names(self):
+        names = []
+        for step in (self.config.get('actions_on') or {}).get('actions') or []:
+            svc = step.get('action') if isinstance(step, dict) else None
+            if not isinstance(svc, str):
+                continue  # not an action call (a delay, a choose...) or a templated one
+            def name_of(eid):
+                st = self.hass.states.get(eid)
+                return st.name if st else eid
+            dom, _, srv = svc.partition('.')
+            if dom == 'script' and srv not in ('turn_on', 'turn_off', 'toggle', 'reload'):
+                names.append(name_of(svc))
+                continue
+            targets = (step.get('target') or {}).get('entity_id') or step.get('entity_id') or []
+            if isinstance(targets, str):
+                targets = [targets]
+            targets = [t for t in targets if isinstance(t, str)]
+            names.append(f'{svc} · {", ".join(name_of(t) for t in targets)}' if targets else svc)
+        return names
             
     async def async_will_remove_from_hass(self) -> None:
         await super().async_will_remove_from_hass()
@@ -2084,10 +2107,13 @@ class EventAlert(AlertBase):
         context = Context(parent_id=self._context.id) if self._context else Context()
         variables = self.getNotificationVars(NotificationReason.Fire)
         variables.update(self._hm_action_vars())
+        started = dt.utcnow()
+        names = self._hm_action_names()
         def done(err=None):
             self.hass.bus.async_fire(EVENT_HM_ACTION, {
                 'entity_id': self.entity_id, 'domain': self.alDomain, 'name': self.alName,
-                'ok': err is None, 'error': str(err) if err is not None else None }, context=context)
+                'ok': err is None, 'error': str(err) if err is not None else None,
+                'actions': names, 'started': started.isoformat() }, context=context)
         try:
             rez = await self.actions_on_script.async_run(variables, context)
             done()
@@ -2531,6 +2557,8 @@ class ConditionAlert(AlertBase):
         context = Context(parent_id=self._context.id) if self._context else Context()
         notificationVars = self.getNotificationVars(NotificationReason.Fire)
         notificationVars.update(self._hm_action_vars())  # hm
+        hm_started = dt.utcnow()  # hm
+        hm_names = self._hm_action_names()  # hm
         def started_action() -> None:
             # This is always a callback from a coro so there is no
             # risk of this running in a thread which allows us to use
@@ -2541,7 +2569,8 @@ class ConditionAlert(AlertBase):
         def hm_action_done(err=None):
             self.hass.bus.async_fire(EVENT_HM_ACTION, {
                 'entity_id': self.entity_id, 'domain': self.alDomain, 'name': self.alName,
-                'ok': err is None, 'error': str(err) if err is not None else None }, context=context)
+                'ok': err is None, 'error': str(err) if err is not None else None,
+                'actions': hm_names, 'started': hm_started.isoformat() }, context=context)
         try:
             #with trace.trace_path("action_on"):
             rez = await self.actions_on_script.async_run(notificationVars, context, started_action)

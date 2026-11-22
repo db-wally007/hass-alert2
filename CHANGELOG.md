@@ -4,6 +4,29 @@ Releases of this fork of [redstone99/hass-alert2](https://github.com/redstone99/
 A release is `v<upstream version>+hm.<n>`; alert-console-card carries its own version.
 Everything listed is add-only - upstream behaviour is unchanged unless it is used.
 
+## [1.22+hm.3] - 2026-11-22
+
+On Alert2 1.22, with alert-console-card 1.1.1.
+
+### Added
+
+- **An alert's timeline names what its actions ran:** a script by its name, any other action as
+  itself with the names of what it targets (`counter.increment · Runs`), where an entry used to
+  say only "Action ran". The entry is timed at the start of the run - the doorbell's chime at the
+  press, not seconds later when the script ends. The `alert2_hm_action` event carries `actions`
+  and `started`. alert-console-card shows them in the History tab, the timeline's detail, the
+  phone's event page and the event popup (*Ran*).
+
+### Fixed
+
+- **Saving a rule in the card deleted it** on Home Assistant 2026.11 and later. An edit starts
+  the rule from nothing by dropping the state Home Assistant kept for the old entity, which
+  reached for `RestoreStateData.last_states` - gone in 2026.11, replaced by one dict by entity
+  id and one by registry id. That step runs after the old alert was removed, so its
+  `AttributeError` left the rule deleted and the card showed "undeclareAlert failed". Both
+  dicts are cleared now (and the old one on older Home Assistant), and a failure of that step
+  is logged as a warning and no longer fails the save.
+
 ## [1.22+hm.2] - 2026-11-04
 
 On Alert2 1.22, with alert-console-card 1.1.0.

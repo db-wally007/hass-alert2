@@ -37,7 +37,7 @@
  *   grid_options: {columns: full}   # required inside a sections-view grid
  */
 
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 
 /* The Health card's palette, renamed for what it means here. Same hex values, so a red
    alert and a red "offline" are the same red on the same dashboard. */
@@ -263,6 +263,8 @@ function eventDetail(e) {
   const parts = [];
   // one line here: a message's items run on with " · " (the event's popup shows them a line each)
   if (e.message) parts.push(unescapeHtml(e.message).split("\n").map((l) => l.trim()).filter(Boolean).join(" · "));
+  // an action run: what it ran (the fork names each action - a script by its name)
+  if (e.actions?.length) parts.push(e.actions.join(", "));
   if (e.about?.length) parts.push(e.about.join(" · "));
   // an item that came or went; both at once are told apart by + and −
   const both = e.added?.length && e.removed?.length;
@@ -1199,6 +1201,7 @@ class AlertConsoleCard extends HTMLElement {
       field(e.kind === "detected" || e.kind === "detect_cleared" ? "What" : "Message",
             e.message ? unescapeHtml(e.message) : "", "ipd ipmsg") +
       field("About", e.about?.length ? e.about.join("\n") : "", "ipd ipmsg") +
+      field("Ran", e.actions?.length ? e.actions.join("\n") : "", "ipd ipmsg") +
       field("Added", e.added?.length ? e.added.join("\n") : "", "ipd ipmsg") +
       field("Removed", e.removed?.length ? e.removed.join("\n") : "", "ipd ipmsg") +
       field("By", e.user) +
@@ -6797,6 +6800,7 @@ const phCap = (s) => String(s).replace(/^./, (c) => c.toUpperCase());
 // what an event is about, on one line
 function phWhat(e) {
   if (e.message) return unescapeHtml(e.message).split("\n").map((x) => x.trim()).filter(Boolean).join(" · ");
+  if (e.actions?.length) return [e.actions.join(", "), e.error].filter(Boolean).join(" · ");
   if (e.about?.length) return e.about.join(" · ");
   if (e.added?.length) return e.added.join(" · ");
   if (e.removed?.length) return e.removed.join(" · ");
@@ -7598,6 +7602,7 @@ class AlertPhoneView extends HTMLElement {
     if (e.about?.length) parts.push(e.about.join("\n"));
     if (e.added?.length) parts.push(`Added\n${e.added.join("\n")}`);
     if (e.removed?.length) parts.push(`Removed\n${e.removed.join("\n")}`);
+    if (e.actions?.length) parts.push(e.actions.join("\n"));
     if (e.error) parts.push(e.error);
     const snoozed = e.kind === "notification_control" && e.snooze_until && Date.parse(e.snooze_until) > x.t + 5000;
     const facts = [

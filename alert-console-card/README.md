@@ -10,7 +10,7 @@ Plain JavaScript, no build step.
 ## Install
 
 1. Add a dashboard resource:
-   `/local/hass-alert2/alert-console-card/alert-console-card.js?v=1.1.0`, type
+   `/local/hass-alert2/alert-console-card/alert-console-card.js?v=1.1.1`, type
    *JavaScript module*. Raise the `?v=` after every update, or browsers keep the old module.
 2. Also load [state-history-card](https://github.com/db-wally007/state-history-card)
    (≥ 0.1.6). It draws each alert's firing/OK history.
