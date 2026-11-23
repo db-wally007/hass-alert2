@@ -43,7 +43,7 @@ STRUCTURED = (
 # Read first in a file: what the rule is and what it is for. `rule` (the builder's form,
 # long and of no interest to a reader) goes last; everything else in between, in order.
 HEAD = ('domain', 'name', 'generator_name', 'friendly_name', 'category', 'description', 'priority',
-        'allow_clear', 'link', 'link_mobile')
+        'allow_clear', 'clear_on_restart', 'link', 'link_mobile')
 TAIL = ('rule',)
 
 HEADER = (

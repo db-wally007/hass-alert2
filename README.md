@@ -39,7 +39,7 @@ Alert2 is a [Home Assistant](https://www.home-assistant.io/) component that supp
 > - **Calendar reminders** - an API other cards use to put alerts on calendar events
 >   (`alert2/hm/reminders/*`, `hm_reminders.py`).
 > - Rule fields: `category`, `description`, `link` / `link_mobile`, `overlay` (banners),
->   `overlay_open` (open the link), `allow_clear`, `stays_firing_mins`, `actions_on` on event alerts; top level
+>   `overlay_open` (open the link), `allow_clear`, `clear_on_restart`, `stays_firing_mins`, `actions_on` on event alerts; top level
 >   `start_delay_secs`, `merge_warnings_into_errors`.
 
 ## Table of Contents

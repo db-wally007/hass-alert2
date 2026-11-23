@@ -1109,6 +1109,9 @@ class AlertBase(AlertCommon, RestoreEntity):
         self._hm_stays_firing_mins = config['stays_firing_mins'] if 'stays_firing_mins' in config else None
         # hm: whether a person may clear it; attribute `allow_clear` only when set
         self._hm_allow_clear = config['allow_clear'] if 'allow_clear' in config else None
+        # hm: an event alert cleared when Home Assistant starts (attribute `clear_on_restart`
+        # only when set) - see _hm_after_restore
+        self._hm_clear_on_restart = config['clear_on_restart'] if 'clear_on_restart' in config else None
         # hm: the dashboards that show a banner while it fires (attribute `overlay`, their
         # url_paths) - drawn by the Alerts card; the engine only passes it on
         self._hm_overlay = config['overlay'] if 'overlay' in config else None
@@ -1276,6 +1279,7 @@ class AlertBase(AlertCommon, RestoreEntity):
         # NOTE - RestoreEntity only saves state every 15 minutes (STATE_DUMP_INTERVAL)
         # So HA looses last 15min of alert firing information when it restarts.
         last_state = await self.async_get_last_state()
+        restored_fire = None  # hm: the fire this restore brought back from the run before, if any
         if last_state:
             if 'last_notified_time' in last_state.attributes and last_state.attributes['last_notified_time']:
                 tdate = dt.parse_datetime(last_state.attributes['last_notified_time'])
@@ -1289,6 +1293,7 @@ class AlertBase(AlertCommon, RestoreEntity):
                 tdate = dt.parse_datetime(last_state.attributes['last_fired_time'])
                 if not self.last_fired_time or tdate > self.last_fired_time:
                     self.last_fired_time = tdate
+                    restored_fire = tdate
                     if 'last_fired_message' in last_state.attributes:
                         self.last_fired_message = last_state.attributes['last_fired_message']
                     if 'fires_since_last_notify' in last_state.attributes:
@@ -1315,8 +1320,9 @@ class AlertBase(AlertCommon, RestoreEntity):
                     else:
                         self.notification_control = dt.parse_datetime(val)
         self.extraVariables.update({ 'alert_entity_id': self.entity_id })
+        self._hm_after_restore(restored_fire)
         # child class calls addedToHassDone
-                        
+
     async def async_update(self) -> None:
         await super().async_update()
         if self.friendlyNameTracker:
@@ -1363,6 +1369,8 @@ class AlertBase(AlertCommon, RestoreEntity):
             baseDict['stays_firing_mins'] = self._hm_stays_firing_mins
         if self._hm_allow_clear is not None:
             baseDict['allow_clear'] = self._hm_allow_clear
+        if self._hm_clear_on_restart is not None:
+            baseDict['clear_on_restart'] = self._hm_clear_on_restart
         if self._hm_overlay:
             baseDict['overlay'] = list(self._hm_overlay)
         if self._hm_overlay_open:
@@ -1376,6 +1384,11 @@ class AlertBase(AlertCommon, RestoreEntity):
     # (it has no end of its own) and no for a condition alert (it turns OK by itself)
     def hm_can_clear(self):
         return self._hm_allow_clear if self._hm_allow_clear is not None else not isinstance(self, ConditionAlert)
+
+    # hm: what a restore of the state of the run before may do to the alert. Nothing, but for an
+    # event alert (EventAlert).
+    def _hm_after_restore(self, restored_fire):
+        pass
 
     # hm: its pushes taken back from the phones once it is over (see hm_push). True when there
     # were any - `pushed_to` changed, the caller writes the state.
@@ -2049,7 +2062,24 @@ class EventAlert(AlertBase):
         await super().async_added_to_hass()
         await self.lateInit()
         await self.addedToHassDone()
-                    
+
+    # hm: `clear_on_restart` - the start of Home Assistant clears the fire that was restored from
+    # the run before (it is acknowledged, which on an event alert is "cleared": OK until the next
+    # fire). Only THAT fire: one of this run is newer than the restored one - it fired before
+    # the entity was added, or fires later - and is left firing, so what goes wrong while
+    # Home Assistant starts is still caught. Only while it starts: a reload of Alert2 or an edit
+    # of the rule re-adds the entity into a running Home Assistant and must not clear anything.
+    # The state is written by Home Assistant right after the entity is added.
+    def _hm_after_restore(self, restored_fire):
+        if not self._hm_clear_on_restart or self.alertData.haStarted:
+            return
+        if restored_fire is None or self.last_fired_time != restored_fire:
+            return
+        if self.sub_ack_int():
+            self.last_ack_time = dt.now()
+            self.fires_since_last_notify = 0
+            self.hm_take_back()
+
     @property
     def state(self) -> str:
         if not self.last_fired_time:

@@ -147,7 +147,7 @@ def prepStrConfigField(fname, tval, doReport=True):
                     'delay_on_secs',
                     'generator_name', 'skip_internal_errors', 'notifier_startup_grace_secs',
                     'link', 'link_mobile', 'description', 'allow_clear', 'category',
-                    'stays_firing_mins' ]:  # hm: plain strings, no YAML parsing
+                    'stays_firing_mins', 'clear_on_restart' ]:  # hm: plain strings, no YAML parsing
         # Should not need yaml parsing
         return tval
     elif fname in [ 'display_msg', 'reminder_message' ]:

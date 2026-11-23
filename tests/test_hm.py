@@ -1174,3 +1174,64 @@ async def test_hm_builtin_set_in_yaml_keeps_its_yaml(hass, service_calls):
     assert 'uiId' in rez, rez
     await hass.async_block_till_done()
     assert hass.states.get('alert2.alert2_error').attributes['friendly_name'] == 'From YAML'
+
+
+# ---- clear_on_restart: a restart ends what the run before fired ----------------------
+
+def _restored_fires(hass, eids, when):
+    from homeassistant.core import State
+    from pytest_homeassistant_custom_component.common import mock_restore_cache
+    mock_restore_cache(hass, [State(e, when.isoformat(), {
+        'last_fired_time': when.isoformat(), 'last_fired_message': 'old error'}) for e in eids])
+
+
+def _door_alert(name, **extra):
+    return {'domain': 'test', 'name': name, 'notifier': None,
+            'trigger': [{'platform': 'state', 'entity_id': 'sensor.door', 'to': 'open'}], **extra}
+
+
+async def test_hm_clear_on_restart_clears_the_fire_of_the_run_before(hass, service_calls):
+    fired = utcnow() - rawdt.timedelta(hours=3)
+    _restored_fires(hass, ['alert2.test_c1', 'alert2.test_c2'], fired)
+    await start(hass, [_door_alert('c1', clear_on_restart=True), _door_alert('c2')])
+    c1 = hass.states.get('alert2.test_c1').attributes
+    assert c1['is_acked'] and c1['clear_on_restart'] is True
+    assert c1['last_fired_message'] == 'old error'          # what it said is still on record
+    assert not hass.states.get('alert2.test_c2').attributes['is_acked']  # not asked: as before
+    assert 'clear_on_restart' not in hass.states.get('alert2.test_c2').attributes
+    # what goes wrong in THIS run is firing: it is newer than what the restart cleared
+    await setAndWait(hass, 'sensor.door', 'open')
+    c1 = hass.states.get('alert2.test_c1')
+    assert not c1.attributes['is_acked']
+    assert c1.state != fired.isoformat()
+
+
+async def test_hm_clear_on_restart_leaves_a_fire_of_this_run(hass, service_calls):
+    gad = await start(hass, [_door_alert('c3', clear_on_restart=True)])
+    await setAndWait(hass, 'sensor.door', 'open')
+    ent = gad.tracked['test']['c3']
+    fire = ent.last_fired_time
+    gad.haStarted = False                                    # as while Home Assistant starts
+    # it fired in this run before the entity was added: the restored fire is the older one
+    ent._hm_after_restore(fire - rawdt.timedelta(hours=1))
+    assert not ent.is_acked()
+    ent._hm_after_restore(None)                              # nothing restored
+    assert not ent.is_acked()
+    ent._hm_after_restore(fire)                              # the restored fire is the latest
+    assert ent.is_acked()
+    ent.last_ack_time = None
+    gad.haStarted = True                                     # a running Home Assistant: no clearing
+    ent._hm_after_restore(fire)
+    assert not ent.is_acked()
+
+
+async def test_hm_clear_on_restart_is_not_a_reload_of_alert2(hass, service_calls, monkeypatch):
+    cfg = {'alerts': [_door_alert('c4', clear_on_restart=True)]}
+    await start(hass, cfg['alerts'])
+    await setAndWait(hass, 'sensor.door', 'open')
+    before = hass.states.get('alert2.test_c4')
+    assert not before.attributes['is_acked']
+    await reload_with(hass, monkeypatch, {'alert2': cfg})
+    after = hass.states.get('alert2.test_c4')
+    assert after.state == before.state                       # still the same fire ...
+    assert not after.attributes['is_acked']                  # ... and it is still firing

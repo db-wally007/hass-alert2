@@ -337,6 +337,12 @@ SINGLE_TRACKED_SCHEMA_PRE_NAME = vol.Schema({
     #          Unset: yes for an event alert, no for a condition alert (that one turns OK by
     #          itself once its condition is false). Read by the cards; the engine ignores it.
     vol.Optional('allow_clear'): cv.boolean,
+    #   clear_on_restart - an event alert that is cleared (reset to OK) when Home Assistant
+    #          starts: what it fired in the run before is over, what it fires in the new run is
+    #          not. For an alert that reports what went wrong (the built-in error alerts), where
+    #          a restart ends the run it was about. Only the start of Home Assistant clears it,
+    #          not a reload of Alert2 or an edit of the rule. Unset: no.
+    vol.Optional('clear_on_restart'): cv.boolean,
     #   overlay - the dashboards (their url_paths, e.g. tablet-dashboard) that show a banner
     #          across the top while the alert fires and is neither cleared nor snoozed. Drawn
     #          by the Alerts card on every dashboard; the engine only passes it on.

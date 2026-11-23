@@ -4,6 +4,20 @@ Releases of this fork of [redstone99/hass-alert2](https://github.com/redstone99/
 A release is `v<upstream version>+hm.<n>`; alert-console-card carries its own version.
 Everything listed is add-only - upstream behaviour is unchanged unless it is used.
 
+## [1.22+hm.4] - 2026-11-23
+
+On Alert2 1.22, with alert-console-card 1.1.1 (unchanged).
+
+### Added
+
+- **`clear_on_restart`** (event alerts): when Home Assistant starts, the alert is cleared - OK
+  until its next fire - if what it last fired was in the run before. What it fires in the new run
+  stays firing: only the fire restored from the run before is cleared, never one that came after
+  it, so what goes wrong while Home Assistant starts is still caught. Only the start of Home
+  Assistant clears it; a reload of Alert2 or an edit of the rule does not. For alerts that report
+  what went wrong, like the built-in error alerts, which otherwise stay firing across a restart
+  for a day. The restore leaves an entry in the timeline, as a clear does.
+
 ## [1.22+hm.3] - 2026-11-22
 
 On Alert2 1.22, with alert-console-card 1.1.1.
